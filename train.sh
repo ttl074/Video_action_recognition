@@ -1,6 +1,6 @@
 #!/bin/bash
 python run.py \
-    --frame_dir HMDB51 \
+    --frame_dir /content/datasets/HMDB51 \
     --train_size 0.75 \
     --test_size 0.15 \
     --model_type lrcn \

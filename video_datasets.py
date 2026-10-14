@@ -21,7 +21,19 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.model_selection import StratifiedShuffleSplit
 
-
+def list_frames(folder):
+    """
+    List all JPEG frame files in the specified folder, sorted by frame number.
+    
+    Args:
+        folder (str): Path to the folder containing frame images.
+    
+    Returns:
+        list: List of frame file paths, sorted by frame number.
+    """
+    frame_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.jpg')]
+    sorted_files = sorted(frame_files, key=lambda x: int(os.path.basename(x).split('.')[0]))
+    return sorted_files
 class VideoDataset(Dataset):
     """
     PyTorch Dataset class for loading video data from directories of frame images.
@@ -56,7 +68,7 @@ class VideoDataset(Dataset):
                    with T being the number of frames (up to fr_per_vid) and label is an integer.
         """
         # Get all JPEG frame paths from the video directory and select up to fr_per_vid frames
-        fr_paths = glob.glob(self.dataset[idx][0] + '/*.jpg')
+        fr_paths = list_frames(self.dataset[idx][0])
         fr_paths = fr_paths[:self.fpv]
         
         # Open images using PIL
@@ -205,3 +217,6 @@ def collate_fn_rnn(batch):
     labels_tensor = torch.tensor(label_batch)
     
     return padded_imgs, labels_tensor
+
+
+
