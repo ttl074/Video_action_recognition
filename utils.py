@@ -19,9 +19,19 @@ from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
 
-def get_frames(vid, n_frames=1):
+class FrameExtractionError(RuntimeError):
+    """Custom exception for errors during video processing."""
+    def __init__(self, video,reason,n_frames,retrieved_frames):
+        self.video = video
+        self.reason = reason
+        self.n_frames = n_frames
+        self.retrieved_frames = retrieved_frames
+        super().__init__(f"{video} got only {retrieved_frames} of {n_frames} because {reason}")
+
+
+def get_frames(vid, n_frames=16):
     """
-    Uniformly sample frames from a video file.
+    Sample n_frames RGB frames at the center of equal-length segments of a video
 
     Args:
         vid (str): Path to the video file.
@@ -31,30 +41,38 @@ def get_frames(vid, n_frames=1):
         tuple: (frames, v_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
             - v_len (int): Total number of frames in the video.
-            
+    
+    Raises:
+        FrameExtractionError: If video cannot be opened, contains no frames, or stream ended before n_frames are extracted
     Notes:
-        - If the video cannot be opened or contains no frames, an empty list and 0 are returned.
-        - Frames are sampled at uniformly spaced indices.
+        Assumes that v_len >= n_frames
     """
     frames = []
+    v_len = 0
     v_cap = cv2.VideoCapture(vid)
-    if not v_cap.isOpened():
-        print("Failed to open video:", vid)
-        return frames, 0
-    v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if v_len <= 0:
-        print("No frames found in video:", vid)
+    try:
+        if not v_cap.isOpened():
+            raise FrameExtractionError(vid,"failed to open video",n_frames,len(frames))
+        v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if v_len <= 0:
+            raise FrameExtractionError(vid,"no frames found in video",n_frames,len(frames))
+        frame_idx = ((np.arange(n_frames)+0.5)*(v_len/n_frames)).astype(int)
+
+        for idx in range(v_len):
+            success = v_cap.grab()
+            if not success:
+                break
+            if idx in frame_idx:
+                success, frame = v_cap.retrieve()
+                if success:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames.append(frame)
+            if len(frames) == n_frames:
+                break
+        if len(frames) != n_frames:
+            raise FrameExtractionError(vid,"stream ended early",n_frames,len(frames))
+    finally:
         v_cap.release()
-        return frames, 0
-    frame_idx = np.linspace(0, v_len-1, n_frames+1, dtype=np.int16)
-    for idx in range(v_len):
-        success, frame = v_cap.read()
-        if not success:
-            continue
-        if idx in frame_idx:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
-    v_cap.release()
     return frames, v_len
 
 
@@ -71,13 +89,20 @@ def store_frames(frames, store_path):
 
     Returns:
         None
-    """
-    for idx, frame in enumerate(frames):
-        print("processing")
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        path_to_frame = os.path.join(store_path, "frame{}.jpg".format(idx))
-        cv2.imwrite(path_to_frame, frame)
 
+    Raises:
+        OSError: If a frame failed to write
+
+    Notes:
+        Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they sort correctly and match list_frames) 
+    """
+    os.makedirs(store_path,exist_ok=True)
+    for idx, frame in enumerate(frames):
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        path_to_frame = os.path.join(store_path, f"{idx:05d}.jpg")
+        if not cv2.imwrite(path_to_frame, frame):
+            raise OSError(f"Failed to write to {path_to_frame}")
+       
 
 def transform_stats(model='lrcn'):
     """
