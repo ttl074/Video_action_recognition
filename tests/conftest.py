@@ -44,7 +44,7 @@ def ucf50_frames_dir():
     Returns:
         str: Path to the UCF50 dataset frames directory.
     """
-    frames_path = os.environ.get("UCF50_FRAMES_DIR",'/content/datasets/UCF50_frames')
+    frames_path = os.environ.get("UCF50_FRAMES_DIR",'/content/datasets/UCF50_frames_16')
     if not os.path.isdir(frames_path):
         pytest.skip(f"UCF50 dataset frames have not been extracted yet at {frames_path}. Run frame-extraction script first")
     return frames_path
@@ -52,6 +52,7 @@ def ucf50_frames_dir():
 
 @pytest.fixture(scope="session")
 def video_dirs(ucf50_frames_dir):
+    
     """
     Fixture to provide a list of video dirs in the UCF50 dataset.
     

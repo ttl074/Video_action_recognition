@@ -8,7 +8,7 @@ and the dataset behaves as expected when accessed.
 
 TODO: VideoDataset loading/transform tests
 """
-import video_datasets as vd
+import src.video_datasets as vd
 import os
 import random 
 from PIL import Image

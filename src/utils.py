@@ -16,7 +16,7 @@ import numpy as np
 
 from torchvision import transforms as transforms
 from torch.utils.data import DataLoader
-from video_datasets import collate_fn_r3d_18, collate_fn_rnn
+from src.video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
 
 class FrameExtractionError(RuntimeError):

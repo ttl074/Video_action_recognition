@@ -32,11 +32,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 import numpy as np
 
-from video_datasets import VideoDataset, load_dataset, dataset_split
+from src.video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN
 from train import train
-from test import test, get_test_report, get_confusion_matrix
+from evaluate import test, get_test_report, get_confusion_matrix
 
 def args_parser():
     """
