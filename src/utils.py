@@ -13,10 +13,36 @@ for video classification tasks. It includes functions for:
 import os
 import cv2
 import numpy as np
-
 from torchvision import transforms as transforms
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
+
+
+def sample_frames(v_cap,v_len, n_frames):
+    """
+    Helper function to sample n_frames from video
+
+    Returns: 
+        tuple: (frames, frame_count)
+            - frames (list): List of sampled frames (as numpy arrays in RGB format).
+            - frame_count (int): Number of frames grabbed before pass stopped
+    """
+    frame_idx = ((np.arange(n_frames)+0.5)*(v_len/n_frames)).astype(int)
+    frame_count = 0
+    frames = []
+    for idx in range(v_len):
+        success = v_cap.grab()
+        if not success:
+            break
+        frame_count += 1
+        if idx in frame_idx:
+            success, frame = v_cap.retrieve()
+            if success:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+        if len(frames) == n_frames:
+            break
+    return frames, frame_count
 
 
 class FrameExtractionError(RuntimeError):
@@ -38,42 +64,44 @@ def get_frames(vid, n_frames=16):
         n_frames (int): Number of frames to sample from the video.
 
     Returns:
-        tuple: (frames, v_len)
+        tuple: (frames, true_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - v_len (int): Total number of frames in the video.
+            - true_len (int): True decodeable length if metadata was wrong; otherwise metadata length
     
     Raises:
         FrameExtractionError: If video cannot be opened, contains no frames, or stream ended before n_frames are extracted
     Notes:
         Assumes that v_len >= n_frames
+        Runs a second pass if number of extracted frames does not equal n_frames because video metadata might be wrong
     """
     frames = []
     v_len = 0
     v_cap = cv2.VideoCapture(vid)
     try:
+        # if video cannot be opened raise error
         if not v_cap.isOpened():
             raise FrameExtractionError(vid,"failed to open video",n_frames,len(frames))
+        # get video length from metadata
         v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # if video does not have frames raise error
         if v_len <= 0:
             raise FrameExtractionError(vid,"no frames found in video",n_frames,len(frames))
-        frame_idx = ((np.arange(n_frames)+0.5)*(v_len/n_frames)).astype(int)
-
-        for idx in range(v_len):
-            success = v_cap.grab()
-            if not success:
-                break
-            if idx in frame_idx:
-                success, frame = v_cap.retrieve()
-                if success:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frames.append(frame)
-            if len(frames) == n_frames:
-                break
+        # get indexes of center of segments base
+        true_len = v_len
+        frames, frame_count = sample_frames(v_cap,v_len,n_frames)
+        # if number of frames extracted is not target, the metadata counts might be wrong; run second pass with counted video length
+        if frame_count < n_frames:
+            raise FrameExtractionError(vid,"Video has fewer frames than n_frames",n_frames,len(frames))
         if len(frames) != n_frames:
-            raise FrameExtractionError(vid,"stream ended early",n_frames,len(frames))
+            true_len = frame_count
+            v_cap.release()
+            v_cap = cv2.VideoCapture(vid)
+            frames,frame_count = sample_frames(v_cap,frame_count,n_frames)
+            if len(frames) != n_frames:
+                raise FrameExtractionError(vid,"stream ended early",n_frames,len(frames))
     finally:
         v_cap.release()
-    return frames, v_len
+    return frames, true_len
 
 
 def store_frames(frames, store_path):
