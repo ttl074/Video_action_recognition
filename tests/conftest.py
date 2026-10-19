@@ -1,6 +1,11 @@
 import os
 import pytest
 
+@pytest.fixture(scope="session")
+def n_frames():
+    """Number of frames to extract from each video (env: UCF50_N_FRAMES, default=16)."""
+    return int(os.environ.get("UCF50_N_FRAMES","16"))
+
 
 @pytest.fixture(scope="session")
 def ucf50_dataset():

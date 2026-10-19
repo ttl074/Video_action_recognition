@@ -66,9 +66,9 @@ def test_video_dirs(video_dirs):
     assert not not_dirs, f"Entries that are not directories: {not_dirs[:5]}"
 
 
-def test_frame_counts(video_dirs):
+def test_frame_counts(video_dirs,n_frames):
     """
-    Test that there are no empty video folders in the UCF50 dataset and that all directories have the same number of frames.
+    Test that there are no empty video folders in the UCF50 dataset,that all directories have the same number of frames, and that it equals n_frames.
     """
     empty_dirs = []
     frame_counts = {}
@@ -81,7 +81,7 @@ def test_frame_counts(video_dirs):
     outliers = {k:v for k,v in frame_counts.items() if v!=most_common}
     assert not empty_dirs, f"Found {len(empty_dirs)} empty video folders: {empty_dirs[:5]}"
     assert not outliers, f"{len(outliers)} directories do not have the number frames expected: {most_common}\n{list(outliers.items())[:5]}"
-
+    assert most_common == n_frames, f"expected {n_frames} but got {most_common}"
 
 def test_frames_read(video_dirs):
     """
