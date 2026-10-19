@@ -14,7 +14,7 @@ from utils import get_frames, store_frames, FrameExtractionError
 from video_datasets import list_frames
 
 
-def convert_to_dirs(raw_dir,n_frames,store_dir):
+def convert_to_dirs(raw_dir,n_frames,frame_dir):
     """
     Convert avi files in raw video directory to video folders
     
@@ -23,7 +23,7 @@ def convert_to_dirs(raw_dir,n_frames,store_dir):
     Args:
         raw_dir: path to extracted video directory with avis
         n_frames: number of frames to extract from each avi
-        store_dir: directory to store video directories
+        frame_dir: directory to store video directories
 
     Returns:
         None
@@ -49,7 +49,7 @@ def convert_to_dirs(raw_dir,n_frames,store_dir):
         category_path = os.path.join(raw_dir,category)
         video_name = os.path.splitext(avi)[0]
         avi_path = os.path.join(category_path,avi)
-        store_path = os.path.join(store_dir,category,video_name)
+        store_path = os.path.join(frame_dir,category,video_name)
         if os.path.isdir(store_path) and len(list_frames(store_path)) == n_frames:
             skipped += 1
             continue
@@ -69,9 +69,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert dataset avis to video directories")
     parser.add_argument('--raw_dir', type=str, default='/content/datasets/UCF50', help='Path to extracted dataset folder with avis')
     parser.add_argument('--n_frames',type=int,default=16,help='Number of frames to extract from each avi')
-    parser.add_argument('--store_dir',type=str,default='/content/datasets/UCF50_frames_16',help="Directory to output video directories to")
+    parser.add_argument('--frame_dir',type=str,default='/content/datasets/UCF50_frames_16',help="Directory to output video directories to")
     args = parser.parse_args()
     raw_dir = args.raw_dir
     n_frames = args.n_frames
-    store_dir = args.store_dir
-    convert_to_dirs(raw_dir,n_frames,store_dir)
+    frame_dir = args.frame_dir
+    convert_to_dirs(raw_dir,n_frames,frame_dir)
