@@ -147,7 +147,13 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=2026):
     vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
     print('Splitting train/validation/test datasets....')
     groups = np.array([get_group(vid_path) for vid_path in vid_paths])
-    group_nums = np.unique(groups)
+    # UCF50 documents 25 groups per class, but 6 classes have extra groups 26-30 (63 clips).
+    # Temporarily excluded pending instructor guidance; revisit to compute shared groups from data.
+    keep = np.isin(groups, np.arange(1, 26))
+    print(f'Dropping {np.sum(~keep)} videos in groups outside 1-25')
+    vid_paths, vid_labels, groups = vid_paths[keep], vid_labels[keep], groups[keep]
+    group_nums = np.unique(groups)  
+
     num_groups = len(group_nums)
     n_train = round(tr_ratio*num_groups)
     n_test = round(ts_ratio*num_groups)
