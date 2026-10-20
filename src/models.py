@@ -65,19 +65,21 @@ class LRCN(nn.Module):
     """
     def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True, cnn_model='resnet34'):
         super(LRCN, self).__init__()
-
+        if pretrained:
+            weights = "IMAGENET1K_V1"
+        else:
+            weights = None
         # Set up the ResNet backbone as a 2D CNN feature extractor.
         if cnn_model == 'resnet18':
-            base_cnn = models.resnet18(pretrained=pretrained)
+            base_cnn = models.resnet18(weights=weights)
         elif cnn_model == 'resnet34':
-            base_cnn = models.resnet34(pretrained=pretrained)
+            base_cnn = models.resnet34(weights=weights)
         elif cnn_model == 'resnet50':
-            base_cnn = models.resnet50(pretrained=pretrained)
+            base_cnn = models.resnet50(weights=weights)
         elif cnn_model == 'resnet101':
-            base_cnn = models.resnet101(pretrained=pretrained)
+            base_cnn = models.resnet101(weights=weights)
         elif cnn_model == 'resnet152':
-            # Note: This example uses resnet34 for resnet152 option as a placeholder.
-            base_cnn = models.resnet34(pretrained=pretrained)
+            base_cnn = models.resnet152(weights=weights)
         else:
             raise ValueError('The input CNN backbone is not supported, please choose a valid ResNet variant.')
 
