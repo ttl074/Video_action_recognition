@@ -13,7 +13,8 @@ for video classification tasks. It includes functions for:
 import os
 import cv2
 import numpy as np
-from torchvision import transforms as transforms
+import torch
+from torchvision.transforms import v2 as transforms
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
@@ -187,12 +188,14 @@ def compose_data_transforms(height, width, mean, std):
         transforms.Resize((height, width)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        transforms.ToTensor(),
+        transforms.ToImage(),
+        transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(mean, std),
     ])
     val_test_transforms = transforms.Compose([
         transforms.Resize((height, width)),
-        transforms.ToTensor(),
+        transforms.ToImage(),
+        transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(mean, std),
     ])
     return train_transforms, val_test_transforms

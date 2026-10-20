@@ -10,11 +10,9 @@ using stratified sampling, and custom collate functions for handling variable-le
 
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms as transforms
+from torchvision.transforms import v2
 from torch.nn.utils.rnn import pad_sequence
-
 from PIL import Image
-
 import os
 import glob
 from tqdm import tqdm
@@ -57,7 +55,7 @@ class VideoDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Load frames from the video directory corresponding to the given index, apply transforms,
+        Load frames from the video directory corresponding to the given index, apply transform to entire clip,
         and return the stacked tensor of frames along with its label.
         
         Args:
@@ -69,7 +67,7 @@ class VideoDataset(Dataset):
         """
         # Get all JPEG frame paths from the video directory and select up to fr_per_vid frames
         fr_paths = list_frames(self.dataset[idx][0])
-        fr_paths = fr_paths[:self.fpv]
+        #fr_paths = fr_paths[:self.fpv]
         
         # Open images using PIL
         fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
@@ -78,7 +76,7 @@ class VideoDataset(Dataset):
         fr_label = self.dataset[idx][1]
         
         # Apply transforms to each frame if provided, else keep original images
-        fr_imgs_trans = [self.transforms(fr_img) for fr_img in fr_imgs] if self.transforms else fr_imgs
+        fr_imgs_trans = self.transforms(fr_imgs) if self.transforms else v2.ToImage()(fr_imgs)
 
         # Stack transformed images into a tensor if available
         if len(fr_imgs_trans) > 0:
