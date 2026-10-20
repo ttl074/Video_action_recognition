@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Tool caches
+.pytest_cache/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Editor (keep the shared Pylance settings)
+.vscode/*
+!.vscode/settings.json
+
+# Model checkpoints
+*.pt
+*.pth
+
+# Generated split file (regenerated each training run)
+splits.npy
+
+# Data (insurance; datasets live outside the repo)
+*.rar
+*.avi
+UCF50/
+UCF50_frames*/
+
+# Experiment logs
+runs/
+wandb/

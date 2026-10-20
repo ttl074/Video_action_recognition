@@ -89,7 +89,7 @@ class LRCN(nn.Module):
         self.base_model = base_cnn
 
         # Define the LSTM to process the sequence of frame features.
-        self.rnn = nn.LSTM(num_features, hidden_size, n_layers)
+        self.rnn = nn.LSTM(num_features, hidden_size, n_layers,batch_first=True)
         
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
@@ -104,9 +104,9 @@ class LRCN(nn.Module):
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
         
-        For each time step (frame), the CNN backbone extracts features. These features are then
-        passed through the LSTM sequentially. The output from the last time step is then passed
-        through dropout and the final fully-connected layer to produce the class logits.
+        All B*T frames go through the CNN in one batch, the features are reshaped to (B,T,F), and the LSTM
+        (batch-first) processes each clip's frame sequence independently. The output from the last time step
+        is then passed through dropout and the final fully-connected layer to produce the class logits.
 
         Args:
             x (Tensor): Input tensor of shape (batch_size, time_steps, channels, height, width).
@@ -115,20 +115,16 @@ class LRCN(nn.Module):
             Tensor: Output logits for each sample in the batch with shape (batch_size, n_classes).
         """
         bs, ts, c, h, w = x.shape  # batch_size, time_steps, channels, height, width
-        
-        # Process the first frame separately to initialize the LSTM hidden and cell states.
-        idx = 0
-        y = self.base_model(x[:, idx])
-        _, (hn, cn) = self.rnn(y.unsqueeze(1))
-        
-        # Iterate over the remaining frames, feeding each frame's features into the LSTM.
-        for idx in range(1, ts):
-            y = self.base_model(x[:, idx])
-            out, (hn, cn) = self.rnn(y.unsqueeze(1), (hn, cn))
-        
+        # (B*T, C, H, W)
+        x_merge = x.reshape(bs*ts,c,h,w)
+        # (B*T, F)
+        y_merge = self.base_model(x_merge)
+        # (B, T, F)
+        y = y_merge.reshape(bs,ts,-1)
+        # (B, T, Hidden)
+        out,_ = self.rnn(y)        
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
-        
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out

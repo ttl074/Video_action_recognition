@@ -6,7 +6,6 @@ from PIL import Image
 from utils import transform_stats, compose_data_transforms
 import torch
 
-
 def test_train_transform_frame_consistency(tmp_path,n_frames):
     """
     Test that train transforms apply consistently to all frames
@@ -39,3 +38,25 @@ def test_train_transform_frame_consistency(tmp_path,n_frames):
         clips.append(clip)
     assert not failures, f"{len(failures)} check(s) failed, e.g. {failures[:5]}"
     assert any(not torch.equal(clips[0],c) for c in clips[1:]),"all 10 clips were identical; random augmentation may not be running"
+
+
+def test_data_leaks(ucf50_frames_dir):
+    """
+    Test to make sure that splits do not have overlapping groups and that none are empty
+    """
+    vid_dataset,_= vd.load_dataset(ucf50_frames_dir)
+    splits = vd.dataset_split(vid_dataset,0.75,0.15)
+    sets = [set(),set(),set()]
+    for i in range(len(splits)):
+        for path,_ in splits[i]:
+            g = vd.get_group(path) 
+            sets[i].add(g)
+    num_groups = len(sets[0])+len(sets[1])+len(sets[2])
+    assert sets[0], "Training set is empty!"
+    assert sets[1], "Validation set is empty!"
+    assert sets[2], "Test set is empty!"
+    assert not sets[0] & sets[1], f"Training and validation share groups {sorted(sets[0] & sets[1])}"
+    assert not sets[1] & sets[2], f"Validation and test share groups {sorted(sets[1] & sets[2])}"
+    assert not sets[0] & sets[2], f"Training and Test share groups {sorted(sets[0] & sets[2])}"
+    assert num_groups == 25, f"UCF50 has 25 groups found {num_groups}"
+
