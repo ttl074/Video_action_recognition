@@ -6,9 +6,8 @@ video classification tasks. It includes unit tests to verify the functionality o
 VideoDataset class, ensuring that videos are correctly loaded, frames are properly transformed,
 and the dataset behaves as expected when accessed.
 
-TODO: VideoDataset loading/transform tests
 """
-import src.video_datasets as vd
+import video_datasets as vd
 import os
 import random 
 from PIL import Image
