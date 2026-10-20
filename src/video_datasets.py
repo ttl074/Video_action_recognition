@@ -14,10 +14,9 @@ from torchvision.transforms import v2
 from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 import os
-import glob
 from tqdm import tqdm
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
+
 
 def list_frames(folder):
     """
@@ -32,6 +31,19 @@ def list_frames(folder):
     frame_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.jpg')]
     sorted_files = sorted(frame_files, key=lambda x: int(os.path.basename(x).split('.')[0]))
     return sorted_files
+
+def get_group(vid_path):
+    """
+    Extract group number from each video path
+    """
+    vid = os.path.basename(vid_path)
+    group = vid.split('_')[-2]
+    if group.startswith("g") and group[1:].isdigit():
+        return int(group[1:])
+    else:
+        raise ValueError(f"Unexpected tag: {group} at {vid_path}")
+
+
 class VideoDataset(Dataset):
     """
     PyTorch Dataset class for loading video data from directories of frame images.
@@ -112,18 +124,18 @@ def load_dataset(frame_dir):
     return vid_dataset, label_dict
 
 
-def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
+def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=2026):
     """
-    Split the dataset into training, validation, and test sets using stratified sampling.
+    Split the dataset into training, validation, and test sets by group number
     
-    This function uses StratifiedShuffleSplit to ensure that each split has a representative
-    distribution of classes.
+    This function splits the dataset by group number. Each category has videos belonging to the same
+    group that should not be shared among splits.
     
     Args:
         vid_dataset (dict): Dictionary mapping video paths to labels.
-        tr_ratio (float): Proportion of the data to use for training.
-        ts_ratio (float): Proportion of the data to use for testing.
-        seed (int, optional): Random seed for reproducibility. Default is 0.
+        tr_ratio (float): Proportion of the groups to use for training.
+        ts_ratio (float): Proportion of the groups to use for testing.
+        seed (int, optional): Random seed for reproducibility. Default is 2026.
     
     Returns:
         tuple: (tr_dataset, val_dataset, ts_dataset)
@@ -134,24 +146,24 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
     vid_paths = np.array([vid_path for vid_path in vid_dataset.keys()])
     vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
     print('Splitting train/validation/test datasets....')
-
-    # Test split using StratifiedShuffleSplit
-    ts_spliter = StratifiedShuffleSplit(n_splits=1, test_size=ts_ratio, random_state=seed)
-    for tr_val_idx, ts_idx in ts_spliter.split(vid_paths, vid_labels):
-        ts_paths, ts_labels = vid_paths[ts_idx], vid_labels[ts_idx]
-        tr_val_paths, tr_val_labels = vid_paths[tr_val_idx], vid_labels[tr_val_idx]
-    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(ts_paths, ts_labels)]
-
-    # Train/validation split
-    val_ratio = 1 - tr_ratio - ts_ratio
-    val_wt = val_ratio / (tr_ratio + val_ratio)
-    val_spliter = StratifiedShuffleSplit(n_splits=1, test_size=val_wt, random_state=seed)
-    for tr_idx, val_idx in val_spliter.split(tr_val_paths, tr_val_labels):
-        tr_paths, tr_labels = tr_val_paths[tr_idx], tr_val_labels[tr_idx]
-        val_paths, val_labels = tr_val_paths[val_idx], tr_val_labels[val_idx]
-    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_paths, tr_labels)]
-    val_dataset = [(val_path, val_label) for val_path, val_label in zip(val_paths, val_labels)]
-
+    groups = np.array([get_group(vid_path) for vid_path in vid_paths])
+    group_nums = np.unique(groups)
+    num_groups = len(group_nums)
+    n_train = round(tr_ratio*num_groups)
+    n_test = round(ts_ratio*num_groups)
+    n_val = num_groups - n_train - n_test
+    rng = np.random.default_rng(seed)
+    rng.shuffle(group_nums)
+    train_nums,val_nums,test_nums = group_nums[:n_train],group_nums[n_train:n_train+n_val], group_nums[n_train+n_val:]
+    print(f'Train groups: {np.sort(train_nums)}')
+    print(f'Validation groups: {np.sort(val_nums)}')
+    print(f'Test groups: {np.sort(test_nums)}')
+    train_mask = np.isin(groups,train_nums)
+    tr_dataset = list(zip(vid_paths[train_mask],vid_labels[train_mask]))
+    val_mask = np.isin(groups,val_nums)
+    val_dataset = list(zip(vid_paths[val_mask],vid_labels[val_mask]))
+    test_mask = np.isin(groups,test_nums)
+    ts_dataset = list(zip(vid_paths[test_mask],vid_labels[test_mask]))
     return tr_dataset, val_dataset, ts_dataset
 
 
