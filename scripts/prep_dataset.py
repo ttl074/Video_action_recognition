@@ -63,7 +63,7 @@ if __name__ == "__main__":
                         help='Path to the datasets folder in Google Drive where .rar is cached.')
     parser.add_argument('--local_path', type=str, default='/content',
                         help='Path to the local directory for the dataset.')
-    parser.add_argument('--url', type=str, default='https://www.crcv.ucf.edu/data/UCF50.rar',
+    parser.add_argument('--url', type=str, default='https://www.crcv.ucf.edu/data/UCF50/UCF50.rar',
                         help='URL to download the dataset from UCF.')
     args = parser.parse_args()
     prep_dataset(args.drive_path, args.local_path, args.url)
