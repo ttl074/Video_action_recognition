@@ -7,14 +7,36 @@ extraction from individual frames with an LSTM to capture temporal dynamics acro
 An additional fully-connected layer is used to output the final class predictions.
 
 Classes:
-    Identity: A helper module that returns the input unchanged. It is used to replace the fully-connected
-              layer of the ResNet backbone.
-    LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization, and a final
-          fully-connected layer to produce class logits.
+    Identity: A helper module that returns the input unchanged. It is used to replace the
+            fully-connected layer of the ResNet backbone.
+    LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization,
+             and a final fully-connected layer to produce class logits.
 """
 
-import torch.nn as nn
+from dataclasses import dataclass
+from torch import nn
 from torchvision import models
+
+@dataclass
+class LRCNConfig:
+    """
+    Hyperparameters for building an LRCN model.
+
+    Attributes:
+        hidden_size (int): Number of features in the LSTM hidden state.
+        n_layers (int): Number of stacked LSTM layers.
+        dropout_rate (float): Dropout rate applied before the final classification layer.
+        n_classes (int): Number of output classes.
+        pretrained (bool): If True, load ImageNet-1k V1 weights for the CNN backbone.
+        cnn_model (str): ResNet variant for the backbone ('resnet18' ... 'resnet152').
+    """
+    hidden_size: int
+    n_layers: int
+    dropout_rate: float
+    n_classes: int
+    pretrained: bool = True
+    cnn_model: str = 'resnet34'
+
 
 class Identity(nn.Module):
     """
@@ -28,7 +50,7 @@ class Identity(nn.Module):
         >>> output = identity(input_tensor)
     """
     def __init__(self):
-        super(Identity, self).__init__()
+        super().__init__()
 
     def forward(self, x):
         """
@@ -45,59 +67,56 @@ class Identity(nn.Module):
 class LRCN(nn.Module):
     """
     LRCN (Long-term Recurrent Convolutional Network) for video classification.
-    
-    This model uses a ResNet backbone as a 2D CNN to extract spatial features from each video frame.
-    An LSTM network is then used to model the temporal dynamics across the sequence of frame features.
-    Dropout is applied before the final fully-connected layer that produces class logits.
+
+    This model uses a ResNet backbone as a 2D CNN to extract spatial features from each
+    video frame. An LSTM network is then used to model the temporal dynamics across the
+    sequence of frame features. Dropout is applied before the final fully-connected layer
+    that produces class logits.
 
     Args:
-        hidden_size (int): Number of features in the hidden state of the LSTM.
-        n_layers (int): Number of recurrent layers in the LSTM.
-        dropout_rate (float): Dropout rate applied before the final classification layer.
-        n_classes (int): Number of output classes.
-        pretrained (bool, optional): If True, uses a ResNet model pretrained on ImageNet. Default is True.
-        cnn_model (str, optional): Specifies the ResNet variant to use as the backbone.
-                                   Options: 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'.
-                                   Default is 'resnet34'.
-    
+        config (LRCNConfig): Model hyperparameters (LSTM hidden size and number of layers,
+            dropout rate, number of classes, whether to use ImageNet-pretrained weights,
+            and which ResNet variant to use as the backbone). See LRCNConfig for details.
+
     Raises:
-        ValueError: If the specified cnn_model is not supported.
+        ValueError: If config.cnn_model is not a supported ResNet variant.
     """
-    def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True, cnn_model='resnet34'):
-        super(LRCN, self).__init__()
-        if pretrained:
-            weights = "IMAGENET1K_V1"
-        else:
-            weights = None
+
+    def __init__(self, config):
+        super().__init__()
+        weights = "IMAGENET1K_V1" if config.pretrained else None
+
         # Set up the ResNet backbone as a 2D CNN feature extractor.
-        if cnn_model == 'resnet18':
+        if config.cnn_model == 'resnet18':
             base_cnn = models.resnet18(weights=weights)
-        elif cnn_model == 'resnet34':
+        elif config.cnn_model == 'resnet34':
             base_cnn = models.resnet34(weights=weights)
-        elif cnn_model == 'resnet50':
+        elif config.cnn_model == 'resnet50':
             base_cnn = models.resnet50(weights=weights)
-        elif cnn_model == 'resnet101':
+        elif config.cnn_model == 'resnet101':
             base_cnn = models.resnet101(weights=weights)
-        elif cnn_model == 'resnet152':
+        elif config.cnn_model == 'resnet152':
             base_cnn = models.resnet152(weights=weights)
         else:
-            raise ValueError('The input CNN backbone is not supported, please choose a valid ResNet variant.')
+            raise ValueError('The input CNN backbone is not supported, '
+                             'please choose a valid ResNet variant.')
 
         # Retrieve the number of features output by the CNN's original fully-connected layer.
         num_features = base_cnn.fc.in_features
-        
+
         # Replace the original fc layer with an identity mapping so that raw features are returned.
         base_cnn.fc = Identity()
         self.base_model = base_cnn
 
-        # Define the LSTM to process the sequence of frame features.
-        self.rnn = nn.LSTM(num_features, hidden_size, n_layers,batch_first=True)
-        
+        # LSTM over the sequence of frame features; expects (batch, time, features).
+        self.rnn = nn.LSTM(num_features, config.hidden_size, config.n_layers, batch_first=True)
+
         # Define dropout for regularization.
-        self.dropout = nn.Dropout(dropout_rate)
-        
+        self.dropout = nn.Dropout(config.dropout_rate)
+
         # Final fully-connected layer to produce logits for each class.
-        self.fc = nn.Linear(hidden_size, n_classes)
+        self.fc = nn.Linear(config.hidden_size, config.n_classes)
+
 
     def forward(self, x):
         """
@@ -106,9 +125,10 @@ class LRCN(nn.Module):
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
         
-        All B*T frames go through the CNN in one batch, the features are reshaped to (B,T,F), and the LSTM
-        (batch-first) processes each clip's frame sequence independently. The output from the last time step
-        is then passed through dropout and the final fully-connected layer to produce the class logits.
+        All B*T frames go through the CNN in one batch, the features are reshaped to (B,T,F),
+        and the LSTM(batch-first) processes each clip's frame sequence independently. The output
+        from the last time stepis then passed through dropout and the final fully-connected layer
+        to produce the class logits.
 
         Args:
             x (Tensor): Input tensor of shape (batch_size, time_steps, channels, height, width).
@@ -124,7 +144,7 @@ class LRCN(nn.Module):
         # (B, T, F)
         y = y_merge.reshape(bs,ts,-1)
         # (B, T, Hidden)
-        out,_ = self.rnn(y)        
+        out,_ = self.rnn(y)
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
         # Pass the final output through the fully-connected layer to get class logits.

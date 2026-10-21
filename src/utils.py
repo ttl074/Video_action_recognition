@@ -1,7 +1,7 @@
 """
 Module: utils.py
 
-This module provides helper functions for video processing and data transformations 
+This module provides helper functions for video processing and data transformations
 for video classification tasks. It includes functions for:
     - Uniformly sampling frames from videos.
     - Storing extracted frames as JPEG images.
@@ -21,12 +21,20 @@ from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
 def sample_frames(v_cap,v_len, n_frames):
     """
-    Helper function to sample n_frames from video
+    Helper function to sample n_frames from an open video capture.
 
-    Returns: 
+    Grabs frames sequentially and retrieves only those at the centers of n_frames
+    equal-length segments of the first v_len frames.
+
+    Args:
+        v_cap (cv2.VideoCapture): An opened video capture positioned at the first frame.
+        v_len (int): Number of frames to treat as the video length when computing segments.
+        n_frames (int): Number of frames to sample.
+
+    Returns:
         tuple: (frames, frame_count)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - frame_count (int): Number of frames grabbed before pass stopped
+            - frame_count (int): Number of frames grabbed before the pass stopped.
     """
     frame_idx = ((np.arange(n_frames)+0.5)*(v_len/n_frames)).astype(int)
     frame_count = 0
@@ -67,13 +75,16 @@ def get_frames(vid, n_frames=16):
     Returns:
         tuple: (frames, true_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - true_len (int): True decodeable length if metadata was wrong; otherwise metadata length
+            - true_len (int): True decodeable length if metadata was wrong;
+              otherwise metadata length
     
     Raises:
-        FrameExtractionError: If video cannot be opened, contains no frames, or stream ended before n_frames are extracted
+        FrameExtractionError: If video cannot be opened, contains no frames, or stream ended
+        before n_frames are extracted
     Notes:
         Assumes that v_len >= n_frames
-        Runs a second pass if number of extracted frames does not equal n_frames because video metadata might be wrong
+        Runs a second pass if number of extracted frames does not equal n_frames because
+        video metadata might be wrong
     """
     frames = []
     v_len = 0
@@ -87,12 +98,12 @@ def get_frames(vid, n_frames=16):
         # if video does not have frames raise error
         if v_len <= 0:
             raise FrameExtractionError(vid,"no frames found in video",n_frames,len(frames))
-        # get indexes of center of segments base
         true_len = v_len
         frames, frame_count = sample_frames(v_cap,v_len,n_frames)
-        # if number of frames extracted is not target, the metadata counts might be wrong; run second pass with counted video length
+        # if number of frames extracted is not target, the metadata counts might be wrong;
+        # run second pass with counted video length
         if frame_count < n_frames:
-            raise FrameExtractionError(vid,"Video has fewer frames than n_frames",n_frames,len(frames))
+            raise FrameExtractionError(vid,"Video has fewer than n_frames",n_frames,len(frames))
         if len(frames) != n_frames:
             true_len = frame_count
             v_cap.release()
@@ -123,7 +134,8 @@ def store_frames(frames, store_path):
         OSError: If a frame failed to write
 
     Notes:
-        Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they sort correctly and match list_frames) 
+        Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they
+        sort correctly and match list_frames) 
     """
     os.makedirs(store_path,exist_ok=True)
     for idx, frame in enumerate(frames):
@@ -131,7 +143,7 @@ def store_frames(frames, store_path):
         path_to_frame = os.path.join(store_path, f"{idx:05d}.jpg")
         if not cv2.imwrite(path_to_frame, frame):
             raise OSError(f"Failed to write to {path_to_frame}")
-       
+
 
 def transform_stats(model='lrcn'):
     """
@@ -168,10 +180,13 @@ def transform_stats(model='lrcn'):
 
 def compose_data_transforms(height, width, mean, std):
     """
-    Compose and return data transforms for training and validation/test datasets.
+    Compose and return clip-level data transforms for training and validation/test datasets.
 
-    The training transforms include data augmentation such as random horizontal flipping and random affine transformations,
-    while the validation/test transforms consist solely of resizing, converting to tensor, and normalizing.
+    Both pipelines use torchvision.transforms.v2 and are called once per clip on the list
+    of PIL frames, so any random parameters (flip, translation) are sampled once and applied
+    identically to every frame in the clip. The training pipeline adds random horizontal
+    flipping and random translation; the validation/test pipeline only resizes, converts to
+    a float tensor in [0, 1], and normalizes.
 
     Args:
         height (int): Desired image height.
@@ -181,8 +196,8 @@ def compose_data_transforms(height, width, mean, std):
 
     Returns:
         tuple: (train_transforms, val_test_transforms)
-            - train_transforms: Composed transforms for the training set.
-            - val_test_transforms: Composed transforms for the validation/test set.
+            - train_transforms: Composed v2 transforms for the training set.
+            - val_test_transforms: Composed v2 transforms for the validation/test set.
     """
     train_transforms = transforms.Compose([
         transforms.Resize((height, width)),
@@ -221,14 +236,18 @@ def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn',num_
     pw = num_workers > 0
     if model == "lrcn":
         train_dl = DataLoader(train_dataset, batch_size=batch_size,shuffle=True,
-                            collate_fn=collate_fn_rnn,num_workers=num_workers,persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_rnn,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
         val_dl = DataLoader(val_dataset, batch_size=2 * batch_size, shuffle=False,
-                            collate_fn=collate_fn_rnn,num_workers=num_workers,persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_rnn,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
     else:
         train_dl = DataLoader(train_dataset, batch_size=batch_size,shuffle=True,
-                            collate_fn=collate_fn_r3d_18,num_workers=num_workers,persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_r3d_18,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
         val_dl = DataLoader(val_dataset, batch_size=2 * batch_size, shuffle=False,
-                            collate_fn=collate_fn_r3d_18,num_workers=num_workers,persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_r3d_18,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
     dataloaders = {'train': train_dl, 'val': val_dl}
     return dataloaders
 
@@ -252,10 +271,11 @@ def test_dloaders(test_dataset, batch_size, model='lrcn',num_workers=0):
 
     if model == "lrcn":
         test_dl = DataLoader(test_dataset, batch_size=2 * batch_size, shuffle=False,
-                            collate_fn=collate_fn_rnn,num_workers=num_workers, persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_rnn,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
     else:
         test_dl = DataLoader(test_dataset, batch_size=2 * batch_size, shuffle=False,
-                            collate_fn=collate_fn_r3d_18,num_workers=num_workers, persistent_workers=pw, pin_memory=True)
+                            collate_fn=collate_fn_r3d_18,num_workers=num_workers,
+                            persistent_workers=pw, pin_memory=True)
     dataloaders = {'test': test_dl}
     return dataloaders
-

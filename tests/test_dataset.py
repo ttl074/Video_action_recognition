@@ -1,24 +1,26 @@
 """
 Module: test_dataset.py
 
-This module provides functions for testing dataset loading and processing for 
-video classification tasks. It includes unit tests to verify the functionality of the 
-VideoDataset class, ensuring that videos are correctly loaded, frames are properly transformed,
-and the dataset behaves as expected when accessed.
+Integrity tests for the UCF50 data on disk. They check that the raw dataset has 50
+class folders and 6,681 .avi files, and that frame extraction produced one folder per
+video, each with exactly n_frames readable JPEG frames.
 
+These tests need the real dataset and skip automatically when it is not present
+(see conftest.py for the paths and environment variables).
 """
-import video_datasets as vd
 import os
-import random 
-from PIL import Image
+import random
 import collections
-
+from PIL import Image
+import video_datasets as vd
 
 def test_raw_class_folders(ucf50_dataset):
     """
     Test the preparation of the UCF50 dataset.
     """
-    assert len(os.listdir(ucf50_dataset)) == 50, f"UCF50 dataset directory has {len(os.listdir(ucf50_dataset))} categories, expected 50."
+    n_categories = len(os.listdir(ucf50_dataset))
+    size_message = f"UCF50 dataset directory has {n_categories} categories, expected 50."
+    assert n_categories == 50, size_message
     with os.scandir(ucf50_dataset) as entries:
         # Check if every single entry is a directory
         all_folders = all(entry.is_dir() for entry in entries)
@@ -29,7 +31,8 @@ def test_video_avis(video_avis):
     """
     Test that we have the correct number of video avis in the UCF50 dataset and that all are avis.
     """
-    assert len(video_avis) == 6681, f"Expected 6681 video avis in the UCF50 dataset but found {len(video_avis)}."
+    num_avi_message = f"Expected 6681 video avis in the UCF50 dataset but found {len(video_avis)}."
+    assert len(video_avis) == 6681, num_avi_message
     non_avis = []
     for video_avi in video_avis:
         if not video_avi.lower().endswith(".avi"):
@@ -67,7 +70,8 @@ def test_video_dirs(video_dirs):
 
 def test_frame_counts(video_dirs,n_frames):
     """
-    Test that there are no empty video folders in the UCF50 dataset,that all directories have the same number of frames, and that it equals n_frames.
+    Test that there are no empty video folders in the UCF50 dataset,that all directories
+    have the same number of frames, and that it equals n_frames.
     """
     empty_dirs = []
     frame_counts = {}
@@ -79,7 +83,10 @@ def test_frame_counts(video_dirs,n_frames):
     most_common = collections.Counter(frame_counts.values()).most_common(1)[0][0]
     outliers = {k:v for k,v in frame_counts.items() if v!=most_common}
     assert not empty_dirs, f"Found {len(empty_dirs)} empty video folders: {empty_dirs[:5]}"
-    assert not outliers, f"{len(outliers)} directories do not have the number frames expected: {most_common}\n{list(outliers.items())[:5]}"
+    assert not outliers, (
+        f"{len(outliers)} directories do not have the expected number of frames ({most_common}):\n"
+        f"{list(outliers.items())[:5]}"
+    )
     assert most_common == n_frames, f"expected {n_frames} but got {most_common}"
 
 def test_frames_read(video_dirs):
@@ -98,6 +105,9 @@ def test_frames_read(video_dirs):
         try:
             with Image.open(rng.choice(frames)) as img:
                 img.verify()
-        except Exception as e:
-            failures.append((sample,e))
-    assert not failures, f"Failed to read frames from {len(failures)} video folders out of {sample_size} sampled: {failures[:5]}"
+        except (OSError, SyntaxError, ValueError) as e:
+            failures.append((sample, e))
+    assert not failures, (
+        f"Failed to read frames from {len(failures)} of {sample_size} sampled video folders: "
+        f"{failures[:5]}"
+    )
