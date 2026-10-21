@@ -91,6 +91,7 @@ def args_parser():
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('-nw','--num_workers',type=int,default=0,help="Number of workers to prepare upcoming batches")
+    parser.add_argument('--early_stop_patience',type=int,default=8,help="Number of epochs without an improvement in validation loss before early stopping")
 
     parser.add_argument('--wandb',action=argparse.BooleanOptionalAction,default=True,help='Use Weights and Biases to track (disable with --no-wandb)')
     parser.add_argument('--run_name', default=None,help='Name of run to log for W&B')
@@ -142,6 +143,7 @@ def main(args):
     learning_rate = args.learning_rate
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     num_workers = args.num_workers
+    early_stop_patience = args.early_stop_patience
 
     # Wandb parameters
     wb = args.wandb
@@ -184,7 +186,7 @@ def main(args):
                 )
         # Main training procedure
         model.to(device)
-        model, _, _ = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
+        model, _, _ = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs,early_stop_patience)
         wandb.finish()
     elif mode == 'eval':
         # Load saved dataset splits

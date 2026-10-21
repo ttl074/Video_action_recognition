@@ -21,7 +21,7 @@ from tqdm import tqdm
 import torch
 import wandb
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
+def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30,early_stop_patience=8):
     """
     Train and validate the model over a given number of epochs.
     
@@ -32,6 +32,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
     Weights & Biases (a no-op if wandb was initialized with mode="disabled").
     The model with the best validation accuracy is saved to disk. When the scheduler
     lowers the learning rate, the best weights so far are reloaded before training continues.
+    Training stops early if validation loss does not improve for early_stop_patience consecutive
+    epochs.
 
     Args:
         dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders.
@@ -42,7 +44,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
         n_epochs (int, optional): Number of training epochs. Default is 30.
-
+        early_stop_patience (int, optional): Number of epochs without an improvement in val-loss before early stopping
+        
     Returns:
         tuple: (model, loss_hist, acc_hist)
             - model (torch.nn.Module): The trained model loaded with the best validation weights.
@@ -54,7 +57,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_val_acc = 0.0
-
+    best_val_loss = float('inf')
+    stop_counter = 0
     for epoch in range(n_epochs):
         current_lr = get_learning_rate(optimizer)
         print('Epoch {}/{}; Current learning rate {}'.format(epoch+1, n_epochs, current_lr))
@@ -76,10 +80,21 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
             best_model_path = os.path.join(optim_model_wts_dir, best_model_name)
             torch.save(best_model_wts, best_model_path)
             print('Best model weights are updated at epoch {}!'.format(epoch+1))
+            wandb.run.summary["best_val_acc"] = best_val_acc
+            wandb.run.summary["best_epoch"] = epoch + 1
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
         wandb.log({"epoch":epoch+1,"train/loss":train_loss,
                    "train/acc":train_accuracy,"val/loss":val_loss,"val/acc":val_accuracy,"lr":current_lr})
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            stop_counter = 0
+        else:
+            stop_counter +=1
+        if stop_counter >= early_stop_patience:
+            print(f"Early stopping at epoch {epoch+1}: no val-loss improvement for {stop_counter} epochs")
+            wandb.run.summary["stopped_epoch"] = epoch+1
+            break
         # Update learning rate based on validation loss
         scheduler.step(val_loss)
         if current_lr != get_learning_rate(optimizer):
