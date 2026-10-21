@@ -7,4 +7,5 @@ python scripts/run.py \
     --batch_size 4 \
     --mode eval \
     --num_workers 2 \
-    --no-pretrained
+    --no-pretrained \
+    "${@:2}"

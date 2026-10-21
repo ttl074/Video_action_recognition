@@ -9,4 +9,5 @@ python scripts/run.py \
     --fr_per_vid 16 \
     --batch_size 4 \
     --mode 'train' \
-    --num_workers 2
+    --num_workers 2 \
+    "$@"

@@ -16,7 +16,7 @@ import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
-def test(model, dataloader, device):
+def test(model, dataloader, device,criterion):
     """
     Evaluate the model on the test dataset and compute overall accuracy.
     
@@ -28,22 +28,25 @@ def test(model, dataloader, device):
         model (torch.nn.Module): The trained video classification model.
         dataloader (torch.utils.data.DataLoader): DataLoader containing the test dataset.
         device (torch.device): The device (CPU or GPU) on which to perform evaluation.
-    
+        criterion (callable): Loss function
     Returns:
-        tuple: (targets, outputs, accuracy)
+        tuple: (targets, outputs, accuracy, loss)
             - targets (list): Ground truth labels for all samples.
             - outputs (list): Predicted labels for all samples.
             - accuracy (float): Overall accuracy computed as the ratio of correct predictions
                                 to the total number of samples.
+            - loss (float): Mean per-sample loss over the test set
     """
     model.eval()
     with torch.no_grad():
         total_correct_preds = 0.0
+        running_loss = 0.0
         len_dataset = len(dataloader.dataset)
         targets, outputs = [], []
         for x_batch, y_batch in tqdm(dataloader):
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             output = model(x_batch)
+            running_loss += criterion(output,y_batch).item()
             pred = output.argmax(dim=1, keepdim=True)
             correct_preds = pred.eq(y_batch.view_as(pred)).sum().item()
             total_correct_preds += correct_preds
@@ -51,8 +54,8 @@ def test(model, dataloader, device):
             targets.extend(y_batch.detach().cpu().numpy().tolist())
         
         accuracy = total_correct_preds / float(len_dataset)
-    
-    return targets, outputs, accuracy
+        loss = running_loss/len_dataset
+    return targets, outputs, accuracy, loss
 
 def get_test_report(target, output, target_names):
     """

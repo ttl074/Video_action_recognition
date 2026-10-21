@@ -3,6 +3,7 @@ Module: train.py
 
 This module provides functions to train and evaluate a video classification model.
 It includes the main training loop that tracks loss and accuracy over epochs,
+logs per-epoch train/val loss and accuracy and the learning rate to Weights & Biases,
 updates the best performing model based on validation accuracy, and provides helper
 functions to compute the learning rate, batch loss, and epoch loss.
 
@@ -18,6 +19,7 @@ import os
 import copy
 from tqdm import tqdm
 import torch
+import wandb
 
 def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
     """
@@ -26,7 +28,10 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
     This function performs the training loop for a video classification model.
     It iterates through the specified number of epochs, updates model weights
     using backpropagation, and evaluates model performance on a validation set.
-    The model with the best validation accuracy is saved to disk.
+    After each epoch it logs train/val loss and accuracy and the learning rate to
+    Weights & Biases (a no-op if wandb was initialized with mode="disabled").
+    The model with the best validation accuracy is saved to disk. When the scheduler
+    lowers the learning rate, the best weights so far are reloaded before training continues.
 
     Args:
         dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders.
@@ -73,7 +78,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
             print('Best model weights are updated at epoch {}!'.format(epoch+1))
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
-
+        wandb.log({"epoch":epoch+1,"train/loss":train_loss,
+                   "train/acc":train_accuracy,"val/loss":val_loss,"val/acc":val_accuracy,"lr":current_lr})
         # Update learning rate based on validation loss
         scheduler.step(val_loss)
         if current_lr != get_learning_rate(optimizer):

@@ -8,29 +8,33 @@ the following:
 
 - Train mode:
     - Loads the dataset from a directory structure.
-    - Splits the dataset into training, validation, and test sets.
+    - Splits the dataset into training, validation, and test sets by group, so clips from the
+      same source video never appear in more than one split.
     - Creates PyTorch Datasets and DataLoaders for training and validation.
     - Initializes the model (e.g., LRCN) and defines the loss function, optimizer, and learning rate scheduler.
-    - Runs the training loop and saves the best model weights.
+    - Runs the training loop, logs per-epoch train/val loss and accuracy and the learning rate
+      to Weights & Biases, and saves the best model weights.
 
 - Eval mode:
     - Loads the pre-generated dataset splits.
     - Creates a DataLoader for the test set.
     - Loads the trained model checkpoint.
-    - Evaluates the model on the test set and prints overall test accuracy.
-    
+    - Evaluates the model on the test set, logs test loss and accuracy to Weights & Biases,
+      and prints overall test accuracy, a per-class report, and per-class confusion matrices.
+
+W&B logging can be turned off with --no-wandb, and runs can be named with --run_name.
 The module also includes a helper function for parsing command-line arguments.
 """
 
 import os
 import argparse
+import numpy as np
+import wandb
 
 import torch
 import torch.nn as nn
 from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-
-import numpy as np
 
 from video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
@@ -54,7 +58,7 @@ def args_parser():
         -c/--ckpt: Path for loading a trained model checkpoint.
         -mt/--model_type: Model type, either '3dcnn' or 'lrcn' (default 'lrcn').
         -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction (default 'resnet34').
-        -p/--pretrained: Whether to use a pretrained CNN backbone (default True).
+        --pretrained/--no-pretrained: Whether to use an ImageNet-pretrained CNN backbone (default True).
         -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer (default 100).
         -rnl/--rnn_n_layers: Number of RNN/LSTM layers (default 1).
         -m/--mode: Mode of operation: 'train' or 'eval' (required).
@@ -62,6 +66,9 @@ def args_parser():
         -d/--dropout: Dropout rate for regularization (default 0.1).
         -lr/--learning_rate: Learning rate for training (default 3e-5).
         -ne/--n_epochs: Number of training epochs (default 30).
+        -nw/--num_workers: Number of DataLoader worker processes (default 0; use ~CPU count on Colab).
+        --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
+        --run_name: Name for the W&B run; auto-generated if not given (default None).
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -84,6 +91,9 @@ def args_parser():
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('-nw','--num_workers',type=int,default=0,help="Number of workers to prepare upcoming batches")
+
+    parser.add_argument('--wandb',action=argparse.BooleanOptionalAction,default=True,help='Use Weights and Biases to track (disable with --no-wandb)')
+    parser.add_argument('--run_name', default=None,help='Name of run to log for W&B')
     args = parser.parse_args()
     return args
 
@@ -132,6 +142,10 @@ def main(args):
     learning_rate = args.learning_rate
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     num_workers = args.num_workers
+
+    # Wandb parameters
+    wb = args.wandb
+    rn = args.run_name
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(model_type)
     tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
@@ -142,7 +156,7 @@ def main(args):
 
     if mode == 'train':
         # Load dataset and split into train/validation/test
-        vid_dataset, label_dict = load_dataset(frame_dir)
+        vid_dataset, _ = load_dataset(frame_dir)
         tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
 
         # Save the splits for reproducibility and later use in evaluation
@@ -162,11 +176,16 @@ def main(args):
         lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
         os.makedirs("./models", exist_ok=True)
         optim_model_dir = './models'
-
+        wandb.init(
+                project="Video_Action_Recognition",
+                name=rn,
+                config=vars(args),
+                mode="online" if wb else "disabled"
+                )
         # Main training procedure
         model.to(device)
-        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
-
+        model, _, _ = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
+        wandb.finish()
     elif mode == 'eval':
         # Load saved dataset splits
         splits = np.load('./splits.npy', allow_pickle=True)
@@ -176,17 +195,26 @@ def main(args):
         # Create PyTorch Dataset and DataLoader for the test set
         ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
         dataloaders = test_dloaders(ts_dataset, batch_size, model_type,num_workers)
-
+        criterion = nn.CrossEntropyLoss(reduction='sum')
         # Load the trained model checkpoint
-        model.load_state_dict(torch.load(args.ckpt,map_location=device))
+        model.load_state_dict(torch.load(ckpt,map_location=device))
         model.to(device)
-        targets, outputs, accuracy = test(model, dataloaders['test'], device)
-
+        wandb.init(
+                project="Video_Action_Recognition",
+                name=rn,
+                config=vars(args),
+                mode="online" if wb else "disabled"
+                )
+        targets, outputs, accuracy, loss = test(model, dataloaders['test'], device, criterion)
+        wandb.log({"test/loss":loss,"test/acc":accuracy})
+        _,labels_dict = load_dataset(frame_dir)
+        all_cats = sorted(labels_dict,key=labels_dict.get)
         print('The overall test accuracy is {:.4f}%.'.format(100 * accuracy))
+        print('The overall test loss is {:.4f}'.format(loss))
         # Optionally, generate a detailed test report or confusion matrix:
-        # print(get_test_report(targets, outputs, all_cats))
-        # print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
-
+        print(get_test_report(targets, outputs, all_cats))
+        print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
+        wandb.finish()
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')
 
