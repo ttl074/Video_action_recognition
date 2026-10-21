@@ -8,4 +8,5 @@ python scripts/run.py \
     --n_classes 50 \
     --fr_per_vid 16 \
     --batch_size 4 \
-    --mode 'train'
+    --mode 'train' \
+    --num_workers 2

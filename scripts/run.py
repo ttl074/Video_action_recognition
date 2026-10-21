@@ -65,7 +65,7 @@ def args_parser():
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
-    parser.add_argument('-fd', '--frame_dir', help='Directory for storing video frames')
+    parser.add_argument('-fd', '--frame_dir', default='/content/datasets/UCF50_frames_16',help='Directory containing the extracted frame folders')
     parser.add_argument('-trs', '--train_size', type=float, default=0.7, help='Train set size')
     parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
@@ -78,12 +78,12 @@ def args_parser():
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
 
-    parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
+    parser.add_argument('-m', '--mode', type=str, help="Either 'train' or 'eval'", required=True)
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
-
+    parser.add_argument('-nw','--num_workers',type=int,default=0,help="Number of workers to prepare upcoming batches")
     args = parser.parse_args()
     return args
 
@@ -131,7 +131,7 @@ def main(args):
     n_epochs = args.n_epochs
     learning_rate = args.learning_rate
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
+    num_workers = args.num_workers
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(model_type)
     tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
@@ -154,12 +154,12 @@ def main(args):
         # Create PyTorch Datasets and DataLoaders for train and validation
         tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms)
         val_dataset = VideoDataset(val_split, fr_per_vid, val_ts_transforms)
-        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type)
+        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type,num_workers)
 
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
         opt = optim.Adam(model.parameters(), lr=learning_rate)
-        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5, verbose=1)
+        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
         os.makedirs("./models", exist_ok=True)
         optim_model_dir = './models'
 
@@ -175,10 +175,10 @@ def main(args):
 
         # Create PyTorch Dataset and DataLoader for the test set
         ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
-        dataloaders = test_dloaders(ts_dataset, batch_size, model_type)
+        dataloaders = test_dloaders(ts_dataset, batch_size, model_type,num_workers)
 
         # Load the trained model checkpoint
-        model.load_state_dict(torch.load(args.ckpt))
+        model.load_state_dict(torch.load(args.ckpt,map_location=device))
         model.to(device)
         targets, outputs, accuracy = test(model, dataloaders['test'], device)
 

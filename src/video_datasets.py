@@ -190,12 +190,14 @@ def collate_fn_r3d_18(batch):
             - imgs_tensor (Tensor): Stacked video frames tensor with shape adjusted for R3D-18.
             - labels_tensor (Tensor): Tensor of labels.
     """
-    imgs_batch, label_batch = list(zip(*batch))
-    imgs_batch = [imgs for imgs in imgs_batch if len(imgs) > 0]
-    label_batch = [torch.tensor(l) for l, imgs in zip(label_batch, imgs_batch) if len(imgs) > 0]
+    # Filter clips and labels together so they stay paired
+    valid_samples = [(imgs, label) for imgs, label in batch if len(imgs) > 0]
+    if not valid_samples:
+        return None, None
+    imgs_batch, label_batch = zip(*valid_samples)
     imgs_tensor = torch.stack(imgs_batch)
     imgs_tensor = torch.transpose(imgs_tensor, 2, 1)
-    labels_tensor = torch.stack(label_batch)
+    labels_tensor = torch.tensor(label_batch)
     return imgs_tensor, labels_tensor
 
 

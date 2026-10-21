@@ -5,4 +5,6 @@ python scripts/run.py \
     --model_type lrcn \
     --n_classes 50 \
     --batch_size 4 \
-    --mode eval
+    --mode eval \
+    --num_workers 2 \
+    --no-pretrained
