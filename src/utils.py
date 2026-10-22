@@ -3,7 +3,7 @@ Module: utils.py
 
 This module provides helper functions for video processing and data transformations
 for video classification tasks. It includes functions for:
-    - Uniformly sampling frames from videos.
+    - Sampling all frames from a video.
     - Storing extracted frames as JPEG images.
     - Retrieving image transformation statistics based on the model type.
     - Composing data transforms for training and validation/test datasets.
@@ -19,98 +19,70 @@ from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
 
-def sample_frames(v_cap,v_len, n_frames):
+def sample_frames(v_cap):
     """
-    Helper function to sample n_frames from an open video capture.
-
-    Grabs frames sequentially and retrieves only those at the centers of n_frames
-    equal-length segments of the first v_len frames.
+    Helper function to sample all frames from an open video capture. Reads all available frames.
 
     Args:
         v_cap (cv2.VideoCapture): An opened video capture positioned at the first frame.
-        v_len (int): Number of frames to treat as the video length when computing segments.
-        n_frames (int): Number of frames to sample.
 
     Returns:
-        tuple: (frames, frame_count)
-            - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - frame_count (int): Number of frames grabbed before the pass stopped.
+        frames (list): List of sampled frames (as numpy arrays in RGB format).
     """
-    frame_idx = ((np.arange(n_frames)+0.5)*(v_len/n_frames)).astype(int)
-    frame_count = 0
     frames = []
-    for idx in range(v_len):
-        success = v_cap.grab()
-        if not success:
-            break
-        frame_count += 1
-        if idx in frame_idx:
-            success, frame = v_cap.retrieve()
-            if success:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(frame)
-        if len(frames) == n_frames:
-            break
-    return frames, frame_count
+    success= True
+    while success:
+        success, frame = v_cap.read()
+        if success:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame)
+    return frames
 
 
 class FrameExtractionError(RuntimeError):
     """Custom exception for errors during video processing."""
-    def __init__(self, video,reason,n_frames,retrieved_frames):
+    def __init__(self, video,reason,retrieved_frames):
         self.video = video
         self.reason = reason
-        self.n_frames = n_frames
         self.retrieved_frames = retrieved_frames
-        super().__init__(f"{video} got only {retrieved_frames} of {n_frames} because {reason}")
+        super().__init__(f"{video} got only {retrieved_frames} because {reason}")
 
 
 def get_frames(vid, n_frames=16):
     """
-    Sample n_frames RGB frames at the center of equal-length segments of a video
+    Sample all frames from avi files
 
     Args:
         vid (str): Path to the video file.
-        n_frames (int): Number of frames to sample from the video.
-
+        n_frames (int): Minimum number of frames in directory
     Returns:
         tuple: (frames, true_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - true_len (int): True decodeable length if metadata was wrong;
-              otherwise metadata length
+            - true_len (int): Number of decoded frames before padding
     
     Raises:
-        FrameExtractionError: If video cannot be opened, contains no frames, or stream ended
-        before n_frames are extracted
+        FrameExtractionError: If video cannot be opened or contains no frames
     Notes:
-        Assumes that v_len >= n_frames
-        Runs a second pass if number of extracted frames does not equal n_frames because
-        video metadata might be wrong
+        If true_len < n_frames, pad (n_frames-true_len) to frames list
     """
     frames = []
-    v_len = 0
     v_cap = cv2.VideoCapture(vid)
     try:
         # if video cannot be opened raise error
         if not v_cap.isOpened():
-            raise FrameExtractionError(vid,"failed to open video",n_frames,len(frames))
-        # get video length from metadata
-        v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            raise FrameExtractionError(vid,"failed to open video",len(frames))
+        frames = sample_frames(v_cap)
+        true_len = len(frames)
         # if video does not have frames raise error
-        if v_len <= 0:
-            raise FrameExtractionError(vid,"no frames found in video",n_frames,len(frames))
-        true_len = v_len
-        frames, frame_count = sample_frames(v_cap,v_len,n_frames)
-        # if number of frames extracted is not target, the metadata counts might be wrong;
-        # run second pass with counted video length
-        if frame_count < n_frames:
-            raise FrameExtractionError(vid,"Video has fewer than n_frames",n_frames,len(frames))
-        if len(frames) != n_frames:
-            true_len = frame_count
-            v_cap.release()
-            v_cap = cv2.VideoCapture(vid)
-            frames,frame_count = sample_frames(v_cap,frame_count,n_frames)
-            if len(frames) != n_frames:
-                raise FrameExtractionError(vid,"stream ended early",n_frames,len(frames))
+        if true_len == 0:
+            raise FrameExtractionError(vid,"no frames found in video",len(frames))
+        # if number of extracted frames is less than target,
+        # pad n_frames - true_len repeated frame at segment centers
+        if true_len < n_frames:
+            num_pad = n_frames - true_len
+            frame_idx = ((np.arange(num_pad)+0.5)*(true_len/num_pad)).astype(int)
+            idx = sorted(np.concatenate((range(true_len),frame_idx)))
+            frames = [frames[i] for i in idx]
     finally:
         v_cap.release()
     return frames, true_len
@@ -134,15 +106,20 @@ def store_frames(frames, store_path):
         OSError: If a frame failed to write
 
     Notes:
-        Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they
-        sort correctly and match list_frames) 
+        Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they sort correctly
+        and match list_frames). 00000.jpg is written last to keep track folder completion
     """
     os.makedirs(store_path,exist_ok=True)
-    for idx, frame in enumerate(frames):
+    for idx, frame in enumerate(frames[1:],start=1):
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         path_to_frame = os.path.join(store_path, f"{idx:05d}.jpg")
         if not cv2.imwrite(path_to_frame, frame):
             raise OSError(f"Failed to write to {path_to_frame}")
+    #write 00000.jpg last for tracking when folder write is finished
+    f = cv2.cvtColor(frames[0], cv2.COLOR_RGB2BGR)
+    ptf = os.path.join(store_path, "00000.jpg")
+    if not cv2.imwrite(ptf, f):
+        raise OSError(f"Failed to write to {ptf}")
 
 
 def transform_stats(model='lrcn'):

@@ -78,7 +78,7 @@ def args_parser():
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
-    parser.add_argument('-fd', '--frame_dir', default='/content/datasets/UCF50_frames_16',
+    parser.add_argument('-fd', '--frame_dir', default='/content/datasets/UCF50_frames',
                         help='Directory containing the extracted frame folders')
     parser.add_argument('-trs', '--train_size', type=float, default=0.7, help='Train set size')
     parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
@@ -169,10 +169,10 @@ def run_train(args, model, device, transforms):
     np.save(SPLITS_PATH, {'train': np.array(tr_split),
                           'val': np.array(val_split),
                           'test': np.array(ts_split)})
-
     # Create PyTorch Datasets and DataLoaders for train and validation
-    dataloaders = train_val_dloaders(VideoDataset(tr_split, args.fr_per_vid, tr_transforms),
-                                     VideoDataset(val_split, args.fr_per_vid, val_ts_transforms),
+    tr_dataset = VideoDataset(tr_split, args.fr_per_vid, True, tr_transforms)
+    val_dataset = VideoDataset(val_split, args.fr_per_vid, False, val_ts_transforms)
+    dataloaders = train_val_dloaders(tr_dataset,val_dataset,
                                      args.batch_size, args.model_type, args.num_workers)
 
     # Define the loss function, optimizer, and learning rate scheduler
@@ -207,7 +207,7 @@ def run_eval(args, model, device, val_ts_transforms):
     ts_split = [(sample[0], int(sample[1])) for sample in splits.item()['test']]
 
     # Create PyTorch Dataset and DataLoader for the test set
-    dataloaders = test_dloaders(VideoDataset(ts_split, args.fr_per_vid, val_ts_transforms),
+    dataloaders = test_dloaders(VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms),
                                 args.batch_size, args.model_type, args.num_workers)
 
     # Load the trained model checkpoint

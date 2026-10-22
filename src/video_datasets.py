@@ -10,6 +10,7 @@ custom collate functions for handling variable-length video sequences.
 """
 
 import os
+import random
 import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
@@ -32,6 +33,41 @@ def list_frames(folder):
     frame_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.jpg')]
     sorted_files = sorted(frame_files, key=lambda x: int(os.path.basename(x).split('.')[0]))
     return sorted_files
+
+
+def sample_frame_paths(fr_paths,fr_per_vid,train):
+    """
+    Select fr_per_vid frame paths from a video, one per equal-length temporal segment.
+
+    The frame list is divided into fr_per_vid contiguous segments covering the whole video.
+    In training mode, one frame is drawn uniformly at random from each segment (temporal
+    jitter), so each epoch sees a different subset of every video. In evaluation mode, the
+    center frame of each segment is taken, so validation and test sampling is deterministic.
+    If the video has fewer frames than fr_per_vid, some frames are repeated, spread evenly
+    across the clip. Selected paths are always in temporal order.
+
+    Args:
+        fr_paths (list): Frame file paths for one video, sorted by frame number.
+        fr_per_vid (int): Number of frames to select.
+        train (bool): If True, sample randomly within each segment; if False, take each
+            segment's center frame.
+
+    Returns:
+        list: fr_per_vid frame paths, in temporal order.
+    """
+    if train:
+        random_idx= []
+        for i in range(fr_per_vid):
+            start = i*len(fr_paths)//fr_per_vid
+            end = (i+1)*len(fr_paths)//fr_per_vid
+            end = max(end, start + 1)
+            idx = random.randint(start,end-1)
+            random_idx.append(idx)
+        fr_paths = [fr_paths[i] for i in random_idx]
+        return fr_paths
+    centers = ((np.arange(fr_per_vid)+0.5)*(len(fr_paths)/fr_per_vid)).astype(int)
+    fr_paths = [fr_paths[i] for i in centers]
+    return fr_paths
 
 
 def get_group(vid_path):
@@ -66,16 +102,20 @@ class VideoDataset(Dataset):
 
     Args:
         vid_dataset (list): List of (video directory path, integer label) tuples.
-        fr_per_vid (int): Number of frames each video folder is expected to contain.
-            Every frame in the folder is loaded; frame selection happens at extraction time.
+        fr_per_vid (int): Number of frames sampled from each video folder per clip, one per
+            equal-length temporal segment (see sample_frame_paths).
+        train (bool): If True, frames are sampled at random positions within each segment
+            (temporal jitter for training); if False, segment centers are used so validation
+            and test clips are deterministic.
         transforms (callable, optional): A clip-level torchvision.transforms.v2 pipeline that
             is called once on the list of PIL frames, so random augmentations are applied
             identically to every frame in the clip. If None, frames are only converted to
             uint8 tensors.
     """
-    def __init__(self, vid_dataset, fr_per_vid, transforms=None):
+    def __init__(self, vid_dataset, fr_per_vid, train, transforms=None):
         self.dataset = vid_dataset
         self.fpv = fr_per_vid
+        self.train = train
         self.transforms = transforms
 
     def __len__(self):
@@ -92,10 +132,11 @@ class VideoDataset(Dataset):
 
         Returns:
             tuple: (frames_tensor, label) where frames_tensor is a tensor of shape (T, C, H, W)
-                   with T being the number of frames in the folder and label is an integer.
+                   with T equal to fr_per_vid, and label is an integer.
         """
         # Get all JPEG frame paths from the video directory, in frame order
         fr_paths = list_frames(self.dataset[idx][0])
+        fr_paths = sample_frame_paths(fr_paths, self.fpv, self.train)
         # Open images using PIL
         fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
         # Get the label associated with the video

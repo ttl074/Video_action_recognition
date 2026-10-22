@@ -63,7 +63,7 @@ def ucf50_frames_dir():
     Returns:
         str: Path to the UCF50 dataset frames directory.
     """
-    frames_path = os.environ.get("UCF50_FRAMES_DIR",'/content/datasets/UCF50_frames_16')
+    frames_path = os.environ.get("UCF50_FRAMES_DIR",'/content/datasets/UCF50_frames')
     if not os.path.isdir(frames_path):
         pytest.skip(f"UCF50 dataset frames have not been extracted yet at {frames_path}.")
     return frames_path

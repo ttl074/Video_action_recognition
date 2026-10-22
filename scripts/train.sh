@@ -1,7 +1,7 @@
 #!/bin/bash
 export PYTHONPATH=src
 python scripts/run.py \
-    --frame_dir /content/datasets/UCF50_frames_16 \
+    --frame_dir /content/datasets/UCF50_frames \
     --train_size 0.75 \
     --test_size 0.15 \
     --model_type lrcn \

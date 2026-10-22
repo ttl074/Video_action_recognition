@@ -70,24 +70,23 @@ def test_video_dirs(video_dirs):
 
 def test_frame_counts(video_dirs,n_frames):
     """
-    Test that there are no empty video folders in the UCF50 dataset,that all directories
-    have the same number of frames, and that it equals n_frames.
+    Test that all directories have at least n_frames frames and that all
+    directories have 00000.jpg (signals completion).
     """
-    empty_dirs = []
-    frame_counts = {}
+    # list of video directories with under n_frames frames
+    undersized = []
+    # list of video directories without 00000.jpg
+    fne = []
     for video_dir in video_dirs:
         frame_files = vd.list_frames(video_dir)
-        frame_counts[video_dir] = len(frame_files)
-        if len(frame_files) == 0:
-            empty_dirs.append(video_dir)
-    most_common = collections.Counter(frame_counts.values()).most_common(1)[0][0]
-    outliers = {k:v for k,v in frame_counts.items() if v!=most_common}
-    assert not empty_dirs, f"Found {len(empty_dirs)} empty video folders: {empty_dirs[:5]}"
-    assert not outliers, (
-        f"{len(outliers)} directories do not have the expected number of frames ({most_common}):\n"
-        f"{list(outliers.items())[:5]}"
-    )
-    assert most_common == n_frames, f"expected {n_frames} but got {most_common}"
+        if len(frame_files) < n_frames:
+            undersized.append(video_dir)
+        if not os.path.exists(os.path.join(video_dir,"00000.jpg")):
+            fne.append(video_dir)
+    under_message = f"Found {len(undersized)} undersized video directories: {undersized[:5]}"
+    assert not undersized, under_message
+    first_message = f"Found {len(fne)} video folders without 00000.jpg: {fne[:5]}"
+    assert not fne, first_message
 
 def test_frames_read(video_dirs):
     """

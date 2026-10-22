@@ -12,18 +12,17 @@ import os
 import shutil
 from tqdm import tqdm
 from utils import get_frames, store_frames, FrameExtractionError
-from video_datasets import list_frames
 
 
 def convert_to_dirs(raw_dir,n_frames,frame_dir):
     """
     Convert avi files in raw video directory to video folders
     
-    Each avi file has n_frames extracted.
+    Each avi file has all frames extracted, padded to at least n_frames
 
     Args:
         raw_dir (str): path to extracted video directory with avis
-        n_frames (int): number of frames to extract from each avi
+        n_frames (int): minimum number of frames in directory
         frame_dir (str): directory to store video directories
 
     Returns:
@@ -36,6 +35,7 @@ def convert_to_dirs(raw_dir,n_frames,frame_dir):
     Notes:
         Outputs to frame_dir/<category>/<video name>/00000.jpg ... 1 video folder per avi
         Uses tqdm to track progress
+        Folders with 00000.jpg are considered complete and skipped
     """
     jobs = []
     skipped = 0
@@ -51,7 +51,7 @@ def convert_to_dirs(raw_dir,n_frames,frame_dir):
         video_name = os.path.splitext(avi)[0]
         avi_path = os.path.join(category_path,avi)
         store_path = os.path.join(frame_dir,category,video_name)
-        if os.path.isdir(store_path) and len(list_frames(store_path)) == n_frames:
+        if os.path.exists(os.path.join(store_path,"00000.jpg")):
             skipped += 1
             continue
         if os.path.isdir(store_path):
@@ -70,9 +70,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert dataset avis to video directories")
     parser.add_argument('--raw_dir', type=str, default='/content/datasets/UCF50',
                         help='Path to extracted dataset folder with avis')
-    parser.add_argument('--n_frames',type=int,default=16,
-                        help='Number of frames to extract from each avi')
-    parser.add_argument('--frame_dir',type=str,default='/content/datasets/UCF50_frames_16',
+    parser.add_argument('--n_frames',type=int,default=32,
+                        help='Minimum number of frames per video folder')
+    parser.add_argument('--frame_dir',type=str,default='/content/datasets/UCF50_frames',
                         help="Directory to output video directories to")
     args = parser.parse_args()
     convert_to_dirs(args.raw_dir, args.n_frames, args.frame_dir)
