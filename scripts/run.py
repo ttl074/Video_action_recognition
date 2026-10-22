@@ -72,7 +72,7 @@ def args_parser():
         -lr/--learning_rate: Learning rate for training (default 3e-5).
         -ne/--n_epochs: Maximum number of training epochs (default 30).
         -nw/--num_workers: Number of DataLoader worker processes (default 0).
-        --early_stop_patience: Epochs without val-loss improvement before stopping (default 8).
+        --early_stop_patience: Epochs without val-loss improvement before stopping (default 10).
         --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
         --run_name: Name for the W&B run; auto-generated if not given (default None).
     """
@@ -111,7 +111,7 @@ def args_parser():
                         help='Maximum number of training epochs')
     parser.add_argument('-nw', '--num_workers', type=int, default=0,
                         help='Number of DataLoader worker processes')
-    parser.add_argument('--early_stop_patience', type=int, default=8,
+    parser.add_argument('--early_stop_patience', type=int, default=10,
                         help='Number of epochs with no val-loss improvement before early stop')
 
     parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=True,
@@ -200,7 +200,7 @@ def run_train(args, model, device, transforms):
     components = TrainComponents(criterion=nn.CrossEntropyLoss(reduction='sum'),
                                  optimizer=opt,
                                  scheduler=ReduceLROnPlateau(opt, mode='min', factor=0.5,
-                                                             patience=5))
+                                                             patience=4))
     os.makedirs(CKPT_DIR, exist_ok=True)
     settings = TrainSettings(device=device, ckpt_dir=CKPT_DIR, n_epochs=args.n_epochs,
                              early_stop_patience=args.early_stop_patience)
