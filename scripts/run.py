@@ -148,6 +148,41 @@ def init_wandb(args):
                mode="online" if args.wandb else "disabled")
 
 
+def prep_dataloaders(args, transforms):
+    """
+    Load the frame dataset, split it by group, save the splits, and build DataLoaders.
+
+    Splits the videos into train/validation/test sets by group, saves all three splits to
+    SPLITS_PATH (later read by run_eval), and builds the training and validation
+    DataLoaders. The training dataset samples frames randomly within each temporal segment;
+    the validation dataset uses segment centers.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+        transforms (tuple): (train_transforms, val_test_transforms) from
+            compose_data_transforms.
+
+    Returns:
+        dict: Dictionary with keys 'train' and 'val' mapping to their respective DataLoaders.
+    """
+    tr_transforms, val_ts_transforms = transforms
+
+    # Load dataset and split into train/validation/test by group
+    vid_dataset, _ = load_dataset(args.frame_dir)
+    tr_split, val_split, ts_split = dataset_split(vid_dataset, args.train_size, args.test_size)
+
+    # Save the splits for reproducibility and later use in evaluation
+    np.save(SPLITS_PATH, {'train': np.array(tr_split),
+                        'val': np.array(val_split),
+                        'test': np.array(ts_split)})
+    # Create PyTorch Datasets and DataLoaders for train and validation
+    tr_dataset = VideoDataset(tr_split, args.fr_per_vid, True, tr_transforms)
+    val_dataset = VideoDataset(val_split, args.fr_per_vid, False, val_ts_transforms)
+    dataloaders = train_val_dloaders(tr_dataset,val_dataset,
+                                         args.batch_size, args.model_type, args.num_workers)
+    return dataloaders
+
+
 def run_train(args, model, device, transforms):
     """
     Split the dataset by group, train the model, and save the best weights.
@@ -159,22 +194,7 @@ def run_train(args, model, device, transforms):
         transforms (tuple): (train_transforms, val_test_transforms) from
             compose_data_transforms.
     """
-    tr_transforms, val_ts_transforms = transforms
-
-    # Load dataset and split into train/validation/test by group
-    vid_dataset, _ = load_dataset(args.frame_dir)
-    tr_split, val_split, ts_split = dataset_split(vid_dataset, args.train_size, args.test_size)
-
-    # Save the splits for reproducibility and later use in evaluation
-    np.save(SPLITS_PATH, {'train': np.array(tr_split),
-                          'val': np.array(val_split),
-                          'test': np.array(ts_split)})
-    # Create PyTorch Datasets and DataLoaders for train and validation
-    tr_dataset = VideoDataset(tr_split, args.fr_per_vid, True, tr_transforms)
-    val_dataset = VideoDataset(val_split, args.fr_per_vid, False, val_ts_transforms)
-    dataloaders = train_val_dloaders(tr_dataset,val_dataset,
-                                     args.batch_size, args.model_type, args.num_workers)
-
+    dataloaders = prep_dataloaders(args, transforms)
     # Define the loss function, optimizer, and learning rate scheduler
     opt = optim.Adam(model.parameters(), lr=args.learning_rate)
     components = TrainComponents(criterion=nn.CrossEntropyLoss(reduction='sum'),

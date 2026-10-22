@@ -10,7 +10,6 @@ These tests need the real dataset and skip automatically when it is not present
 """
 import os
 import random
-import collections
 from PIL import Image
 import video_datasets as vd
 

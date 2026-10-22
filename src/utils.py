@@ -59,7 +59,7 @@ def get_frames(vid, n_frames=16):
         tuple: (frames, true_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
             - true_len (int): Number of decoded frames before padding
-    
+
     Raises:
         FrameExtractionError: If video cannot be opened or contains no frames
     Notes:
@@ -107,7 +107,7 @@ def store_frames(frames, store_path):
 
     Notes:
         Frames are saved as 00000.jpg, 00001.jpg,... (zero-padded so they sort correctly
-        and match list_frames). 00000.jpg is written last to keep track folder completion
+        and match list_frames). 00000.jpg is written last to keep track of folder completion
     """
     os.makedirs(store_path,exist_ok=True)
     for idx, frame in enumerate(frames[1:],start=1):
@@ -126,8 +126,10 @@ def transform_stats(model='lrcn'):
     """
     Retrieve transformation statistics based on the model type.
 
-    For the 'lrcn' model, images are resized to 224x224; for '3dcnn', images are resized to 112x112.
-    Also returns the mean and standard deviation values used for normalization.
+    Returns the output frame size and the per-channel normalization statistics for the
+    given model type: 224x224 with ImageNet statistics for 'lrcn', and 112x112 with
+    Kinetics statistics for '3dcnn'. The size is the final crop size produced by
+    compose_data_transforms.
 
     Args:
         model (str): Type of model ('lrcn' or '3dcnn').
@@ -160,14 +162,17 @@ def compose_data_transforms(height, width, mean, std):
     Compose and return clip-level data transforms for training and validation/test datasets.
 
     Both pipelines use torchvision.transforms.v2 and are called once per clip on the list
-    of PIL frames, so any random parameters (flip, translation) are sampled once and applied
-    identically to every frame in the clip. The training pipeline adds random horizontal
-    flipping and random translation; the validation/test pipeline only resizes, converts to
-    a float tensor in [0, 1], and normalizes.
+    of PIL frames, so any random parameters (crop, flip, color jitter) are sampled once and
+    applied identically to every frame in the clip. The training pipeline takes a random
+    crop covering 50-100% of the frame area and resizes it to height x width, applies a
+    random horizontal flip, and jitters brightness, contrast, saturation, and hue. The
+    validation/test pipeline resizes the short side to height (keeping the aspect ratio) and
+    center-crops to height x width, so evaluation frames are undistorted like the training
+    crops. Both pipelines then convert to a float tensor in [0, 1] and normalize.
 
     Args:
-        height (int): Desired image height.
-        width (int): Desired image width.
+        height (int): Output image height.
+        width (int): Output image width.
         mean (list): Mean values for normalization.
         std (list): Standard deviation values for normalization.
 
@@ -177,15 +182,16 @@ def compose_data_transforms(height, width, mean, std):
             - val_test_transforms: Composed v2 transforms for the validation/test set.
     """
     train_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
+        transforms.RandomResizedCrop((height,width), scale=(0.5,1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+        transforms.ColorJitter(brightness=0.2,contrast=0.2,saturation=0.2,hue=0.05),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(mean, std),
     ])
     val_test_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
+        transforms.Resize(height),
+        transforms.CenterCrop((height,width)),
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(mean, std),
@@ -206,7 +212,7 @@ def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn',num_
         val_dataset (Dataset): PyTorch Dataset for validation data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
-        num_workers (int): Number of workers to prepare batches while GPU is running 
+        num_workers (int): Number of workers to prepare batches while GPU is running
     Returns:
         dict: Dictionary with keys 'train' and 'val' mapping to their respective DataLoaders.
     """
@@ -240,7 +246,7 @@ def test_dloaders(test_dataset, batch_size, model='lrcn',num_workers=0):
         test_dataset (Dataset): PyTorch Dataset for test data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
-        num_workers (int): Number of workers to prepare batches while GPU is running 
+        num_workers (int): Number of workers to prepare batches while GPU is running
     Returns:
         dict: Dictionary with key 'test' mapping to the test DataLoader.
     """
