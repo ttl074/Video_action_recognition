@@ -73,6 +73,8 @@ def args_parser():
         -ne/--n_epochs: Maximum number of training epochs (default 30).
         -nw/--num_workers: Number of DataLoader worker processes (default 0).
         --early_stop_patience: Epochs without val-loss improvement before stopping (default 10).
+        --weight_decay: Weight decay for AdamW optimizer (default 0.0)
+        --freeze_layers: Layers of ResNet backbone to freeze (default none frozen)
         --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
         --run_name: Name for the W&B run; auto-generated if not given (default None).
     """
@@ -113,7 +115,11 @@ def args_parser():
                         help='Number of DataLoader worker processes')
     parser.add_argument('--early_stop_patience', type=int, default=10,
                         help='Number of epochs with no val-loss improvement before early stop')
-
+    parser.add_argument('--weight_decay', type=float, default=0.0,
+                        help='Weight decay for AdamW optimizer (0 disables)')
+    parser.add_argument('--freeze_layers', nargs='*',
+                        choices=['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4'],
+                        help="Layers of CNN backbone to freeze")
     parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=True,
                         help='Log the run to Weights & Biases (disable with --no-wandb)')
     parser.add_argument('--run_name', default=None, help='Name of the run to log in W&B')
@@ -132,7 +138,8 @@ def build_model(args):
     """
     config = LRCNConfig(hidden_size=args.rnn_hidden_size, n_layers=args.rnn_n_layers,
                         dropout_rate=args.dropout, n_classes=args.n_classes,
-                        pretrained=args.pretrained, cnn_model=args.cnn_backbone)
+                        pretrained=args.pretrained, cnn_model=args.cnn_backbone,
+                        freeze_layers=tuple(args.freeze_layers or ()))
     return LRCN(config)
 
 
@@ -193,16 +200,24 @@ def run_train(args, model, device, transforms):
         device (torch.device): Device (CPU or GPU) on which to train.
         transforms (tuple): (train_transforms, val_test_transforms) from
             compose_data_transforms.
+
+    Notes:
+        Best weights are saved to models/<run_name>/ (or models/ if no run name is given).
     """
     dataloaders = prep_dataloaders(args, transforms)
     # Define the loss function, optimizer, and learning rate scheduler
-    opt = optim.Adam(model.parameters(), lr=args.learning_rate)
+    non_frozen = [param for param in model.parameters() if param.requires_grad]
+    opt = optim.AdamW(non_frozen, lr=args.learning_rate, weight_decay=args.weight_decay)
     components = TrainComponents(criterion=nn.CrossEntropyLoss(reduction='sum'),
                                  optimizer=opt,
                                  scheduler=ReduceLROnPlateau(opt, mode='min', factor=0.5,
                                                              patience=4))
-    os.makedirs(CKPT_DIR, exist_ok=True)
-    settings = TrainSettings(device=device, ckpt_dir=CKPT_DIR, n_epochs=args.n_epochs,
+    if args.run_name:
+        ckpt_dir = os.path.join(CKPT_DIR, args.run_name)
+    else:
+        ckpt_dir = CKPT_DIR
+    os.makedirs(ckpt_dir, exist_ok=True)
+    settings = TrainSettings(device=device, ckpt_dir=ckpt_dir, n_epochs=args.n_epochs,
                              early_stop_patience=args.early_stop_patience)
 
     # Main training procedure

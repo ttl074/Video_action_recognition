@@ -6,6 +6,8 @@ classification. The LRCN model combines a 2D CNN backbone (e.g., ResNet) for spa
 extraction from individual frames with an LSTM to capture temporal dynamics across frames.
 An additional fully-connected layer is used to output the final class predictions.
 
+Backbone stages can be frozen.
+
 Classes:
     Identity: A helper module that returns the input unchanged. It is used to replace the
             fully-connected layer of the ResNet backbone.
@@ -29,6 +31,8 @@ class LRCNConfig:
         n_classes (int): Number of output classes.
         pretrained (bool): If True, load ImageNet-1k V1 weights for the CNN backbone.
         cnn_model (str): ResNet variant for the backbone ('resnet18' ... 'resnet152').
+        freeze_layers (tuple): Names of ResNet stages whose weights are frozen and
+                                BatchNorm statistics are also held fixed
     """
     hidden_size: int
     n_layers: int
@@ -36,15 +40,15 @@ class LRCNConfig:
     n_classes: int
     pretrained: bool = True
     cnn_model: str = 'resnet34'
-
+    freeze_layers: tuple = ()
 
 class Identity(nn.Module):
     """
     A placeholder identity operator that is argument-insensitive.
-    
+
     This module is used to replace the fully-connected (fc) layer in the ResNet backbone,
     effectively making the backbone output the raw features before classification.
-    
+
     Example:
         >>> identity = Identity()
         >>> output = identity(input_tensor)
@@ -55,10 +59,10 @@ class Identity(nn.Module):
     def forward(self, x):
         """
         Forward pass that returns the input as is.
-        
+
         Args:
             x (Tensor): Input tensor.
-        
+
         Returns:
             Tensor: The same tensor x.
         """
@@ -76,7 +80,8 @@ class LRCN(nn.Module):
     Args:
         config (LRCNConfig): Model hyperparameters (LSTM hidden size and number of layers,
             dropout rate, number of classes, whether to use ImageNet-pretrained weights,
-            and which ResNet variant to use as the backbone). See LRCNConfig for details.
+            which ResNet variant to use as the backbone, and which backbone stages to
+            freeze). See LRCNConfig for details.
 
     Raises:
         ValueError: If config.cnn_model is not a supported ResNet variant.
@@ -107,7 +112,11 @@ class LRCN(nn.Module):
         # Replace the original fc layer with an identity mapping so that raw features are returned.
         base_cnn.fc = Identity()
         self.base_model = base_cnn
-
+        # freeze layers if specified
+        self.freeze_layers = config.freeze_layers
+        for layer in self.freeze_layers:
+            for param in getattr(self.base_model, layer).parameters():
+                param.requires_grad = False
         # LSTM over the sequence of frame features; expects (batch, time, features).
         self.rnn = nn.LSTM(num_features, config.hidden_size, config.n_layers, batch_first=True)
 
@@ -117,17 +126,16 @@ class LRCN(nn.Module):
         # Final fully-connected layer to produce logits for each class.
         self.fc = nn.Linear(config.hidden_size, config.n_classes)
 
-
     def forward(self, x):
         """
         Forward pass for the LRCN model.
-        
+
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
-        
+
         All B*T frames go through the CNN in one batch, the features are reshaped to (B,T,F),
         and the LSTM(batch-first) processes each clip's frame sequence independently. The output
-        from the last time stepis then passed through dropout and the final fully-connected layer
+        from the last time step is then passed through dropout and the final fully-connected layer
         to produce the class logits.
 
         Args:
@@ -150,3 +158,26 @@ class LRCN(nn.Module):
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out
+
+    def train(self, mode=True):
+        """
+        Set training or evaluation mode, keeping frozen backbone stages in eval mode.
+
+        Calls nn.Module.train(mode) on the whole model, then switches every stage listed in
+        self.freeze_layers back to eval mode. Frozen stages have requires_grad=False, but
+        BatchNorm layers still update their running statistics whenever they are in training
+        mode; without this override, model.train() at the start of each epoch would let the
+        frozen stages' BatchNorm statistics drift away from their ImageNet values.
+
+        Args:
+            mode (bool): True for training mode, False for evaluation mode. model.eval()
+                calls this method with mode=False.
+
+        Returns:
+            LRCN: The model itself, so calls can be chained (e.g. model.train().to(device)).
+        """
+        super().train(mode)
+        for freeze_layer in self.freeze_layers:
+            layer = getattr(self.base_model, freeze_layer)
+            layer.eval()
+        return self
