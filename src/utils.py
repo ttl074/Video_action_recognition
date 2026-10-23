@@ -128,8 +128,9 @@ def transform_stats(model='lrcn'):
 
     Returns the output frame size and the per-channel normalization statistics for the
     given model type: 224x224 with ImageNet statistics for 'lrcn', and 112x112 with
-    Kinetics statistics for '3dcnn'. The size is the final crop size produced by
-    compose_data_transforms.
+    ImageNet statistics for '3dcnn'. The size is the final crop size produced by
+    compose_data_transforms. ImageNet statistics because the R3D weights are inflated
+    from ImageNet ResNet18, and 112×112 to keep the 3D network’s compute manageable on a T4.
 
     Args:
         model (str): Type of model ('lrcn' or '3dcnn').
@@ -150,8 +151,8 @@ def transform_stats(model='lrcn'):
         std = [0.229, 0.224, 0.225]
     elif model == '3dcnn':
         h, w = 112, 112
-        mean = [0.43216, 0.394666, 0.37645]
-        std = [0.22803, 0.22145, 0.216989]
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
     else:
         raise ValueError('model_type arg is undefined....')
     return h, w, mean, std

@@ -11,7 +11,8 @@ parameters, and training hyperparameters. Depending on the selected mode
     - Splits the dataset into training, validation, and test sets by group, so clips from the
       same source video never appear in more than one split.
     - Creates PyTorch Datasets and DataLoaders for training and validation.
-    - Initializes the model and defines the loss function, optimizer, and learning rate scheduler.
+    - Initializes the model (an LRCN or an R3D-18 3D CNN, chosen with --model_type) and
+      defines the loss function, optimizer, and learning rate scheduler.
     - Runs the training loop, logs per-epoch train/val loss and accuracy and the learning rate
       to Weights & Biases, and saves the best model weights.
 
@@ -37,7 +38,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
-from models import LRCN, LRCNConfig
+from models import LRCN, LRCNConfig, build_r3d18
 from train import train, TrainComponents, TrainSettings
 from evaluate import test, get_test_report, get_confusion_matrix
 
@@ -60,12 +61,16 @@ def args_parser():
         -fpv/--fr_per_vid: Number of frames per video to consider (default 16).
         -nc/--n_classes: Number of classes for the classification task (required).
         -c/--ckpt: Path for loading a trained model checkpoint.
-        -mt/--model_type: Model type, either '3dcnn' or 'lrcn' (default 'lrcn').
-        -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction (default 'resnet34').
-        --pretrained/--no-pretrained: Whether to use an ImageNet-pretrained CNN backbone
-            (default True).
-        -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer (default 100).
-        -rnl/--rnn_n_layers: Number of RNN/LSTM layers (default 1).
+        -mt/--model_type: Model type: 'lrcn' (ResNet + LSTM) or '3dcnn' (R3D-18)
+            (default 'lrcn').
+        -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction; LRCN only
+            (default 'resnet34').
+        --pretrained/--no-pretrained: Whether to start from ImageNet-pretrained weights
+            (default True). LRCN loads them into its 2D backbone; R3D-18 uses ResNet18's,
+            inflated along time.
+        -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer; LRCN only
+            (default 100).
+        -rnl/--rnn_n_layers: Number of RNN/LSTM layers; LRCN only (default 1).
         -m/--mode: Mode of operation: 'train' or 'eval' (required).
         -bs/--batch_size: Mini-batch size (required).
         -d/--dropout: Dropout rate for regularization (default 0.1).
@@ -73,8 +78,9 @@ def args_parser():
         -ne/--n_epochs: Maximum number of training epochs (default 30).
         -nw/--num_workers: Number of DataLoader worker processes (default 0).
         --early_stop_patience: Epochs without val-loss improvement before stopping (default 10).
-        --weight_decay: Weight decay for AdamW optimizer (default 0.0)
-        --freeze_layers: Layers of ResNet backbone to freeze (default none frozen)
+        --weight_decay: Weight decay for AdamW optimizer (default 0.0).
+        --freeze_layers: Layers of the ResNet backbone to freeze; LRCN only
+            (default none frozen).
         --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
         --run_name: Name for the W&B run; auto-generated if not given (default None).
     """
@@ -90,13 +96,14 @@ def args_parser():
                         help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
-    parser.add_argument('-mt', '--model_type', help='3D CNN or LRCN', default='lrcn')
+    parser.add_argument('-mt', '--model_type', choices=['lrcn', '3dcnn'], default='lrcn',
+                        help="'lrcn' (ResNet + LSTM) or '3dcnn' (R3D-18)")
     parser.add_argument('-cnn', '--cnn_backbone', default='resnet34',
                         choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'],
                         help='2D CNN backbone')
     parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction, default=True,
-                        help='Use an ImageNet-pretrained CNN backbone '
-                        '(disable with --no-pretrained)')
+                        help='Start from ImageNet weights (LRCN: 2D backbone; '
+                        '3dcnn: inflated ResNet18) (disable with --no-pretrained)')
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100,
                         help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1,
@@ -128,19 +135,27 @@ def args_parser():
 
 def build_model(args):
     """
-    Build an LRCN model from the command-line arguments.
+    Build the model selected by --model_type from the command-line arguments.
+
+    For 'lrcn', builds an LRCN from the RNN, backbone, dropout, pretrained, and
+    freeze_layers arguments. For '3dcnn', builds an R3D-18 with build_r3d18, which uses only
+    n_classes, dropout, and pretrained (inflated ImageNet ResNet18 weights); the backbone,
+    RNN, and freeze_layers arguments are ignored.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
 
     Returns:
-        LRCN: The constructed (untrained or pretrained-backbone) model.
+        torch.nn.Module: An LRCN or an R3D-18 (VideoResNet) model, untrained or initialized
+            from ImageNet weights.
     """
-    config = LRCNConfig(hidden_size=args.rnn_hidden_size, n_layers=args.rnn_n_layers,
-                        dropout_rate=args.dropout, n_classes=args.n_classes,
-                        pretrained=args.pretrained, cnn_model=args.cnn_backbone,
-                        freeze_layers=tuple(args.freeze_layers or ()))
-    return LRCN(config)
+    if args.model_type == 'lrcn':
+        config = LRCNConfig(hidden_size=args.rnn_hidden_size, n_layers=args.rnn_n_layers,
+                            dropout_rate=args.dropout, n_classes=args.n_classes,
+                            pretrained=args.pretrained, cnn_model=args.cnn_backbone,
+                            freeze_layers=tuple(args.freeze_layers or ()))
+        return LRCN(config)
+    return build_r3d18(args.n_classes, args.dropout, args.pretrained)
 
 
 def init_wandb(args):

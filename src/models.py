@@ -1,18 +1,30 @@
 """
 Module: models.py
 
-This module defines the LRCN (Long-term Recurrent Convolutional Network) model for video
-classification. The LRCN model combines a 2D CNN backbone (e.g., ResNet) for spatial feature
-extraction from individual frames with an LSTM to capture temporal dynamics across frames.
-An additional fully-connected layer is used to output the final class predictions.
+This module defines two models for video classification.
 
-Backbone stages can be frozen.
+The LRCN (Long-term Recurrent Convolutional Network) combines a 2D CNN backbone (e.g.,
+ResNet) for spatial feature extraction from individual frames with an LSTM to capture
+temporal dynamics across frames. An additional fully-connected layer is used to output
+the final class predictions. Backbone stages can be frozen.
+
+The R3D-18 model is a 3D CNN that learns spatial and temporal features together. It can be
+initialized from ImageNet ResNet18 weights inflated along the time axis, so no
+video-pretrained weights are needed.
 
 Classes:
+    LRCNConfig: Hyperparameters for building an LRCN model.
     Identity: A helper module that returns the input unchanged. It is used to replace the
-            fully-connected layer of the ResNet backbone.
+        fully-connected layer of the ResNet backbone.
     LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization,
-             and a final fully-connected layer to produce class logits.
+        and a final fully-connected layer to produce class logits.
+
+Functions:
+    key_translation: Map an R3D-18 state-dict key to the matching ResNet18 key.
+    inflate_conv_weight: Turn a 2D conv weight into a 3D one by repeating it along time
+        and dividing by the temporal size.
+    build_r3d18: Build an R3D-18 classifier, optionally initialized from inflated ImageNet
+        ResNet18 weights.
 """
 
 from dataclasses import dataclass
@@ -181,3 +193,108 @@ class LRCN(nn.Module):
             layer = getattr(self.base_model, freeze_layer)
             layer.eval()
         return self
+
+
+def key_translation(key):
+    """
+    Translate an R3D-18 state-dict key to its ResNet18 equivalent.
+
+    R3D-18 wraps each conv and its BatchNorm in an nn.Sequential, so they appear as
+    'convN.0' and 'convN.1' (and 'stem.0', 'stem.1'), while ResNet18 names them 'convN' and
+    'bnN' (and 'conv1', 'bn1'). Keys that need no change, such as the downsample keys, are
+    returned as they are.
+
+    Args:
+        key (str): State-dict key from R3D-18, e.g. 'layer1.0.conv1.1.weight'.
+
+    Returns:
+        str: The matching ResNet18 key, e.g. 'layer1.0.bn1.weight'.
+    """
+    translations = {
+        'stem.0.':'conv1.',
+        'stem.1.':'bn1.',
+        '.conv1.0.':'.conv1.',
+        '.conv1.1.':'.bn1.',
+        '.conv2.0.':'.conv2.',
+        '.conv2.1.':'.bn2.'
+    }
+    for r3d, resnet in translations.items():
+        key = key.replace(r3d, resnet)
+    return key
+
+
+def inflate_conv_weight(weight, t):
+    """
+    Inflate a 2D ResNet conv weight along a new time axis for R3D.
+
+    The 2D kernel is repeated t times along a new time dimension and divided by t. On a clip
+    where every frame is the same, the 3D conv then gives the same response as the 2D conv
+    on that frame, which keeps the copied BatchNorm running statistics valid. The input
+    weight is not modified.
+
+    Args:
+        weight (Tensor): 2D conv weight of shape (out, in, k, k).
+        t (int): Temporal size of the matching 3D kernel (3 for the stem and 3x3x3 convs,
+            1 for the downsample convs).
+
+    Returns:
+        Tensor: Inflated weight of shape (out, in, t, k, k), each time slice equal to the
+            2D kernel divided by t.
+    """
+    temporal_weight = weight.unsqueeze(2)
+    repeated = temporal_weight.repeat(1, 1, t, 1, 1)
+    norm_weight = repeated / t
+    return norm_weight
+
+
+def build_r3d18(n_classes, dropout, pretrained):
+    """
+    Build an R3D-18 video classifier, optionally initialized from ImageNet ResNet18.
+
+    When pretrained is True, every R3D-18 weight is copied from the ImageNet-pretrained
+    ResNet18: BatchNorm tensors are copied as they are, and each 2D conv kernel is inflated
+    along time by repeating it t times and dividing by t, so the network's response to a
+    static clip matches ResNet18's response to that frame. No video-pretrained (Kinetics)
+    weights are used. The original classification head is replaced with dropout followed
+    by a linear layer with n_classes outputs.
+
+    Args:
+        n_classes (int): Number of output classes.
+        dropout (float): Dropout probability applied before the final linear layer.
+        pretrained (bool): Whether to initialize from inflated ImageNet ResNet18 weights.
+
+    Returns:
+        VideoResNet: The R3D-18 model with a new classification head.
+
+    Raises:
+        ValueError: If an R3D-18 weight cannot be matched to a ResNet18 weight of a
+            compatible shape.
+    """
+    model = models.video.r3d_18(weights=None)
+    if pretrained:
+        weights = "IMAGENET1K_V1"
+        resnet2d = models.resnet18(weights=weights)
+        state_3d = model.state_dict()
+        state_2d = resnet2d.state_dict()
+        weights_3d = {}
+        for key, weight in state_3d.items():
+            if key.startswith('fc.'):
+                weights_3d[key] = weight
+                continue
+            translation = key_translation(key)
+            weight_2d = state_2d[translation]
+            if weight.shape == weight_2d.shape:
+                weights_3d[key] = weight_2d
+            elif weight.ndim == 5 and weight_2d.ndim == 4:
+                weights_3d[key] = inflate_conv_weight(weight_2d, weight.shape[2])
+            else:
+                raise ValueError(f"Cannot map {key} to {translation}: "
+                                 f"3D shape {tuple(weight.shape)}, "
+                                 f"2D shape {tuple(weight_2d.shape)}")
+        model.load_state_dict(weights_3d)
+    in_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(dropout),
+        nn.Linear(in_features, n_classes)
+    )
+    return model
