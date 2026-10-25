@@ -35,22 +35,26 @@ def list_frames(folder):
     return sorted_files
 
 
-def sample_frame_paths(fr_paths,fr_per_vid,train):
+def sample_frame_paths(fr_paths,fr_per_vid,train, offset=0.5):
     """
     Select fr_per_vid frame paths from a video, one per equal-length temporal segment.
 
     The frame list is divided into fr_per_vid contiguous segments covering the whole video.
     In training mode, one frame is drawn uniformly at random from each segment (temporal
     jitter), so each epoch sees a different subset of every video. In evaluation mode, the
-    center frame of each segment is taken, so validation and test sampling is deterministic.
-    If the video has fewer frames than fr_per_vid, some frames are repeated, spread evenly
-    across the clip. Selected paths are always in temporal order.
+    frame at fractional position offset within each segment is taken (the center by
+    default), so validation and test sampling is deterministic; different offsets give
+    different clips of the same video for multi-clip testing. If the video has fewer frames
+    than fr_per_vid, some frames are repeated, spread evenly across the clip. Selected paths
+    are always in temporal order.
 
     Args:
         fr_paths (list): Frame file paths for one video, sorted by frame number.
         fr_per_vid (int): Number of frames to select.
-        train (bool): If True, sample randomly within each segment; if False, take each
-            segment's center frame.
+        train (bool): If True, sample randomly within each segment; if False, take the
+            frame at offset within each segment.
+        offset (float): Fractional position within each segment used in evaluation mode
+            (0.5 = center; default). Must be in [0, 1). Ignored when train is True.
 
     Returns:
         list: fr_per_vid frame paths, in temporal order.
@@ -65,7 +69,7 @@ def sample_frame_paths(fr_paths,fr_per_vid,train):
             random_idx.append(idx)
         fr_paths = [fr_paths[i] for i in random_idx]
         return fr_paths
-    centers = ((np.arange(fr_per_vid)+0.5)*(len(fr_paths)/fr_per_vid)).astype(int)
+    centers = ((np.arange(fr_per_vid)+offset)*(len(fr_paths)/fr_per_vid)).astype(int)
     fr_paths = [fr_paths[i] for i in centers]
     return fr_paths
 
@@ -105,18 +109,21 @@ class VideoDataset(Dataset):
         fr_per_vid (int): Number of frames sampled from each video folder per clip, one per
             equal-length temporal segment (see sample_frame_paths).
         train (bool): If True, frames are sampled at random positions within each segment
-            (temporal jitter for training); if False, segment centers are used so validation
-            and test clips are deterministic.
+            (temporal jitter for training); if False, the frame at offset within each
+            segment is used, so validation and test clips are deterministic.
         transforms (callable, optional): A clip-level torchvision.transforms.v2 pipeline that
             is called once on the list of PIL frames, so random augmentations are applied
             identically to every frame in the clip. If None, frames are only converted to
             uint8 tensors.
+        offset (float): Fractional position within each segment used in evaluation mode
+            (0.5 = center; default). Must be in [0, 1). Ignored when train is True.
     """
-    def __init__(self, vid_dataset, fr_per_vid, train, transforms=None):
+    def __init__(self, vid_dataset, fr_per_vid, train, transforms=None, offset=0.5):
         self.dataset = vid_dataset
         self.fpv = fr_per_vid
         self.train = train
         self.transforms = transforms
+        self.offset = offset
 
     def __len__(self):
         """Return the number of video samples in the dataset."""
@@ -136,7 +143,7 @@ class VideoDataset(Dataset):
         """
         # Get all JPEG frame paths from the video directory, in frame order
         fr_paths = list_frames(self.dataset[idx][0])
-        fr_paths = sample_frame_paths(fr_paths, self.fpv, self.train)
+        fr_paths = sample_frame_paths(fr_paths, self.fpv, self.train, self.offset)
         # Open images using PIL
         fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
         # Get the label associated with the video

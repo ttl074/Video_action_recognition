@@ -16,20 +16,54 @@ import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
+def predict_probs(model, dataloader, device):
+    """
+    Compute class probabilities for every sample in a DataLoader.
+
+    Runs the model in evaluation mode without gradients and applies softmax to each
+    batch's outputs. Rows follow the DataLoader's order, so with shuffle=False, passes over
+    the same dataset with different frame offsets line up video by video and can be
+    averaged for multi-clip testing.
+
+    Args:
+        model (torch.nn.Module): The trained video classification model.
+        dataloader (torch.utils.data.DataLoader): DataLoader over the evaluation dataset
+            (shuffle=False when results from several passes will be combined).
+        device (torch.device): The device (CPU or GPU) on which to run the model.
+
+    Returns:
+        tuple: (labels, probs)
+            - labels (list): Ground truth labels for all samples, in DataLoader order.
+            - probs (np.ndarray): Class probabilities, shape (n_samples, n_classes); each
+              row sums to 1.
+    """
+    model.eval()
+    with torch.no_grad():
+        probs = []
+        labels = []
+        for x_batch, y_batch in tqdm(dataloader):
+            x_batch = x_batch.to(device)
+            output = model(x_batch)
+            probs.append(torch.softmax(output, dim=1).cpu())
+            labels.extend(y_batch.tolist())
+    return labels, torch.cat(probs).numpy()
+
+
+
 def test(model, dataloader, device,criterion):
     """
     Evaluate the model on the test dataset and compute overall accuracy.
-    
+
     This function sets the model to evaluation mode and processes the test data
     from the provided DataLoader. It computes predictions for each batch, counts the number
     of correct predictions, and accumulates the true and predicted labels.
-    
+
     Args:
         model (torch.nn.Module): The trained video classification model.
         dataloader (torch.utils.data.DataLoader): DataLoader containing the test dataset.
         device (torch.device): The device (CPU or GPU) on which to perform evaluation.
         criterion (callable): Loss function; expected to use reduction='sum'
-    
+
     Returns:
         tuple: (targets, outputs, accuracy, loss)
             - targets (list): Ground truth labels for all samples.
@@ -59,15 +93,15 @@ def test(model, dataloader, device,criterion):
 def get_test_report(target, output, target_names):
     """
     Generate a detailed classification report based on test results.
-    
+
     This function uses scikit-learn's classification_report to produce a dictionary
     containing precision, recall, F1-score, and support for each class.
-    
+
     Args:
         target (list): Ground truth labels.
         output (list): Predicted labels.
         target_names (list): List of class names corresponding to the labels.
-    
+
     Returns:
         dict: A classification report as a dictionary.
     """
@@ -76,16 +110,16 @@ def get_test_report(target, output, target_names):
 def get_confusion_matrix(targets, outputs, labels_dict, all_cats):
     """
     Compute a multilabel confusion matrix for each class.
-    
+
     This function converts numeric labels to their corresponding class names using the provided
     labels_dict, then computes a multilabel confusion matrix for each class using scikit-learn.
-    
+
     Args:
         targets (list): Ground truth numeric labels.
         outputs (list): Predicted numeric labels.
         labels_dict (dict): Dictionary mapping class names to numeric labels.
         all_cats (list): List of all class names.
-    
+
     Returns:
         dict: A dictionary where keys are class names and values are the corresponding
         confusion matrices.

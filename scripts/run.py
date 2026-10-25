@@ -17,13 +17,16 @@ parameters, and training hyperparameters. Depending on the selected mode
       to Weights & Biases, and saves the best model weights.
 
 - Eval mode:
-    - Loads the pre-generated dataset splits.
-    - Creates a DataLoader for the test set.
-    - Loads the trained model checkpoint.
-    - Evaluates the model on the test set, logs test loss and accuracy to Weights & Biases,
-      and prints overall test accuracy, a per-class report, and per-class confusion matrices.
+    - Loads the pre-generated dataset splits and the trained model checkpoint.
+    - With one --test_offsets value (default 0.5), runs single-clip testing: one clip per
+      video, sampled at that position within each temporal segment.
+    - With more than one value, runs multi-clip testing: one clip per offset, with softmax
+      probabilities averaged across clips before taking the prediction.
+    - Logs test loss and accuracy to Weights & Biases, and prints overall test accuracy, a
+      per-class report, and per-class confusion matrices.
 
 W&B logging can be turned off with --no-wandb, and runs can be named with --run_name.
+An interrupted training run can be continued from its last.pt checkpoint with --resume.
 """
 
 import os
@@ -40,7 +43,7 @@ from video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN, LRCNConfig, build_r3d18
 from train import train, TrainComponents, TrainSettings
-from evaluate import test, get_test_report, get_confusion_matrix
+from evaluate import test, get_test_report, get_confusion_matrix, predict_probs
 
 WANDB_PROJECT = "Video_Action_Recognition"
 CKPT_DIR = "./models"
@@ -83,7 +86,10 @@ def args_parser():
             (default none frozen).
         --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
         --run_name: Name for the W&B run; auto-generated if not given (default None).
-        --resume: Path to last.pt (default None)
+        --resume: Path to a last.pt checkpoint to resume training from (default None).
+        --test_offsets: Fractional positions in [0, 1) within each temporal segment for
+            test clips; more than one averages predictions over clips (multi-clip testing)
+            (default 0.5).
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -127,11 +133,14 @@ def args_parser():
                         help='Weight decay for AdamW optimizer (0 disables)')
     parser.add_argument('--freeze_layers', nargs='*',
                         choices=['conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4'],
-                        help="Layers of CNN backbone to freeze")
+                        help='Layers of CNN backbone to freeze')
     parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=True,
                         help='Log the run to Weights & Biases (disable with --no-wandb)')
     parser.add_argument('--run_name', default=None, help='Name of the run to log in W&B')
-    parser.add_argument('--resume', default=None, help="Path to last.pt for resuming training")
+    parser.add_argument('--resume', default=None, help='Path to last.pt for resuming training')
+    parser.add_argument('--test_offsets', type=float, nargs='+', default=[0.5],
+                        help='Fractional positions in [0, 1) within each segment for test '
+                        'clips; more than one enables multi-clip testing')
     return parser.parse_args()
 
 
@@ -159,6 +168,7 @@ def restore_args(args, ckpt):
     for attr in ("resume", "num_workers", "wandb"):
         args_dict[attr] = getattr(args, attr)
     return argparse.Namespace(**args_dict)
+
 
 def build_model(args):
     """
@@ -207,8 +217,8 @@ def prep_dataloaders(args, transforms):
 
     Splits the videos into train/validation/test sets by group, saves all three splits to
     SPLITS_PATH (later read by run_eval), and builds the training and validation
-    DataLoaders. The training dataset samples frames randomly within each temporal segment;
-    the validation dataset uses segment centers.
+    DataLoaders. The training dataset samples one frame at a random position within each
+    temporal segment; the validation dataset uses segment centers.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
@@ -226,19 +236,25 @@ def prep_dataloaders(args, transforms):
 
     # Save the splits for reproducibility and later use in evaluation
     np.save(SPLITS_PATH, {'train': np.array(tr_split),
-                        'val': np.array(val_split),
-                        'test': np.array(ts_split)})
+                          'val': np.array(val_split),
+                          'test': np.array(ts_split)})
+
     # Create PyTorch Datasets and DataLoaders for train and validation
     tr_dataset = VideoDataset(tr_split, args.fr_per_vid, True, tr_transforms)
     val_dataset = VideoDataset(val_split, args.fr_per_vid, False, val_ts_transforms)
-    dataloaders = train_val_dloaders(tr_dataset,val_dataset,
-                                         args.batch_size, args.model_type, args.num_workers)
+    dataloaders = train_val_dloaders(tr_dataset, val_dataset,
+                                     args.batch_size, args.model_type, args.num_workers)
     return dataloaders
 
 
-def run_train(args, model, device, transforms,ckpt=None):
+def run_train(args, model, device, transforms, ckpt=None):
     """
     Split the dataset by group, train the model, and save the best weights.
+
+    Builds the AdamW optimizer over the trainable (non-frozen) parameters only, a
+    ReduceLROnPlateau scheduler on validation loss (factor 0.5, patience 4), and summed
+    cross-entropy loss. When resuming, continues the original W&B run using the run ID
+    saved in the checkpoint.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
@@ -250,8 +266,8 @@ def run_train(args, model, device, transforms,ckpt=None):
             None starts a fresh run.
 
     Notes:
-        Best weights are saved to models/<run_name>/ (or models/ if no run name is given).
-        last.pt is also saved there.
+        Best weights (best_model_wts.pt) and the resume checkpoint (last.pt) are saved to
+        models/<run_name>/, or models/ if no run name is given.
     """
     dataloaders = prep_dataloaders(args, transforms)
     # Define the loss function, optimizer, and learning rate scheduler
@@ -278,38 +294,112 @@ def run_train(args, model, device, transforms,ckpt=None):
     wandb.finish()
 
 
+def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
+    """
+    Evaluate the model on the test split with multi-clip testing.
+
+    For each offset in args.test_offsets, samples one clip per video at that position
+    within each temporal segment, runs the model, and prints that clip's own accuracy.
+    The softmax probabilities are then averaged across clips, and the final prediction
+    for each video is the class with the highest averaged probability.
+
+    Args:
+        args (argparse.Namespace): Parsed arguments; uses test_offsets, fr_per_vid,
+            batch_size, model_type, and num_workers.
+        model (torch.nn.Module): Model with the checkpoint already loaded.
+        device (torch.device): Device to run inference on.
+        ts_split (list): Test samples as (frame_dir, label) tuples.
+        val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
+
+    Returns:
+        tuple: (labels, preds, avg_acc, avg_loss), in the same order as evaluate.test:
+            - labels (list[int]): True class index for each video.
+            - preds (list[int]): Predicted class index from the averaged probabilities.
+            - avg_acc (float): Fraction of videos predicted correctly.
+            - avg_loss (float): Mean negative log-likelihood of the true class under
+              the averaged probabilities.
+
+    Raises:
+        ValueError: If any offset is outside [0.0, 1.0).
+
+    Notes:
+        - args.test_offsets must contain at least one offset (guaranteed by nargs='+').
+        - Every pass must return videos in the same order so probabilities line up across
+          clips; test_dloaders uses shuffle=False.
+        - The 0.5 pass reproduces the single-clip (segment-center) evaluation exactly.
+    """
+    probs = []
+    for offset in args.test_offsets:
+        if offset >= 1.0 or offset < 0.0:
+            raise ValueError(f"Offset must be in [0.0, 1.0), got {offset}")
+        vd = VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms, offset=offset)
+        dataloader = test_dloaders(vd, args.batch_size, args.model_type,
+                                   args.num_workers)['test']
+        labels, prob = predict_probs(model, dataloader, device)
+        probs.append(prob)
+        print(f"offset {offset}: {100 * (prob.argmax(axis=1) == np.array(labels)).mean():.2f}%")
+    stacked_avg = np.stack(probs).mean(axis=0)
+    preds = stacked_avg.argmax(axis=1).tolist()
+    avg_acc = (np.array(preds) == np.array(labels)).mean()
+    avg_loss = -np.log(stacked_avg[np.arange(len(labels)), labels] + 1e-12).mean()
+    return labels, preds, avg_acc, avg_loss
+
+
 def run_eval(args, model, device, val_ts_transforms):
     """
     Evaluate a trained checkpoint on the saved test split and log test metrics.
 
+    With one value in --test_offsets, runs standard single-clip testing: one clip per
+    video, sampled at that position within each temporal segment (default 0.5, the
+    segment center). With more than one, runs multi-clip testing via multiclip_eval:
+    one clip per offset, with softmax probabilities averaged across clips before taking
+    the prediction.
+
     Args:
-        args (argparse.Namespace): Parsed command-line arguments (uses --ckpt).
+        args (argparse.Namespace): Parsed command-line arguments (uses --ckpt,
+            --test_offsets, --fr_per_vid, --batch_size, --model_type, --num_workers,
+            and --frame_dir).
         model (torch.nn.Module): A model with the same architecture as the checkpoint.
         device (torch.device): Device (CPU or GPU) on which to evaluate.
         val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
+
+    Notes:
+        - Single-clip results are logged to W&B as test/acc and test/loss; multi-clip
+          results as test/acc_multiclip and test/loss_multiclip. test/n_clips records
+          the number of clips either way.
+        - Prints overall accuracy and loss, the per-class classification report, and the
+          per-class confusion matrices.
     """
     # Load saved dataset splits
     splits = np.load(SPLITS_PATH, allow_pickle=True)
     ts_split = [(sample[0], int(sample[1])) for sample in splits.item()['test']]
-
-    # Create PyTorch Dataset and DataLoader for the test set
-    dataloaders = test_dloaders(VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms),
-                                args.batch_size, args.model_type, args.num_workers)
 
     # Load the trained model checkpoint
     model.load_state_dict(torch.load(args.ckpt, map_location=device))
     model.to(device)
 
     init_wandb(args)
-    targets, outputs, accuracy, loss = test(model, dataloaders['test'], device,
-                                            nn.CrossEntropyLoss(reduction='sum'))
-    wandb.log({"test/loss": loss, "test/acc": accuracy})
+    if len(args.test_offsets) > 1:
+        suffix = "_multiclip"
+        targets, outputs, accuracy, loss = multiclip_eval(
+            args, model, device, ts_split, val_ts_transforms)
+    else:
+        suffix = ""
+        # Create PyTorch Dataset and DataLoader for the test set
+        dataloaders = test_dloaders(
+            VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms,
+                         offset=args.test_offsets[0]),
+            args.batch_size, args.model_type, args.num_workers)
+        targets, outputs, accuracy, loss = test(model, dataloaders['test'], device,
+                                                nn.CrossEntropyLoss(reduction='sum'))
+    wandb.log({f"test/loss{suffix}": loss, f"test/acc{suffix}": accuracy,
+               "test/n_clips": len(args.test_offsets)})
 
     # Class names in label order (load_dataset numbers classes by sorted folder name)
     _, labels_dict = load_dataset(args.frame_dir)
     all_cats = sorted(labels_dict, key=labels_dict.get)
-    print(f'The overall test accuracy is {100 * accuracy:.4f}%.')
-    print(f'The overall test loss is {loss:.4f}')
+    print(f'The overall {len(args.test_offsets)}-clip test accuracy is {100 * accuracy:.4f}%.')
+    print(f'The overall {len(args.test_offsets)}-clip test loss is {loss:.4f}')
     print(get_test_report(targets, outputs, all_cats))
     print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
     wandb.finish()
