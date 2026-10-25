@@ -83,6 +83,7 @@ def args_parser():
             (default none frozen).
         --wandb/--no-wandb: Whether to log the run to Weights & Biases (default True).
         --run_name: Name for the W&B run; auto-generated if not given (default None).
+        --resume: Path to last.pt (default None)
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -130,8 +131,34 @@ def args_parser():
     parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=True,
                         help='Log the run to Weights & Biases (disable with --no-wandb)')
     parser.add_argument('--run_name', default=None, help='Name of the run to log in W&B')
+    parser.add_argument('--resume', default=None, help="Path to last.pt for resuming training")
     return parser.parse_args()
 
+
+def restore_args(args, ckpt):
+    """
+    Rebuild the run's arguments from a checkpoint for resuming training.
+
+    Precedence, lowest to highest: the current command's arguments (so flags added
+    after the checkpoint was saved still get their defaults), then the saved run's
+    arguments from ckpt["run_info"] (so model, data, and training settings match the
+    original run), then the session-specific values resume, num_workers, and wandb from
+    the current command (which depend on the machine and session, not the experiment).
+    The bookkeeping key wandb_id is dropped. ckpt is not modified.
+
+    Args:
+        args (argparse.Namespace): Arguments parsed from the current command.
+        ckpt (dict): Checkpoint loaded from last.pt by save_last_checkpoint.
+
+    Returns:
+        argparse.Namespace: Arguments for the resumed run.
+    """
+    args_dict = dict(vars(args))
+    args_dict.update(ckpt["run_info"])
+    args_dict.pop("wandb_id", None)
+    for attr in ("resume", "num_workers", "wandb"):
+        args_dict[attr] = getattr(args, attr)
+    return argparse.Namespace(**args_dict)
 
 def build_model(args):
     """
@@ -158,16 +185,20 @@ def build_model(args):
     return build_r3d18(args.n_classes, args.dropout, args.pretrained)
 
 
-def init_wandb(args):
+def init_wandb(args, run_id=None):
     """
     Start a Weights & Biases run, or a disabled no-op run when --no-wandb is given.
+    If run_id given, run is resumed and fails if run_id does not exist.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments; all are recorded as the
             run config.
+        run_id (str, optional): ID of an existing W&B run to continue when resuming;
+            None starts a new run.
     """
     wandb.init(project=WANDB_PROJECT, name=args.run_name, config=vars(args),
-               mode="online" if args.wandb else "disabled")
+               mode="online" if args.wandb else "disabled", id=run_id,
+               resume="must" if run_id else None)
 
 
 def prep_dataloaders(args, transforms):
@@ -205,7 +236,7 @@ def prep_dataloaders(args, transforms):
     return dataloaders
 
 
-def run_train(args, model, device, transforms):
+def run_train(args, model, device, transforms,ckpt=None):
     """
     Split the dataset by group, train the model, and save the best weights.
 
@@ -215,9 +246,12 @@ def run_train(args, model, device, transforms):
         device (torch.device): Device (CPU or GPU) on which to train.
         transforms (tuple): (train_transforms, val_test_transforms) from
             compose_data_transforms.
+        ckpt (dict, optional): Checkpoint loaded from last.pt to resume from;
+            None starts a fresh run.
 
     Notes:
         Best weights are saved to models/<run_name>/ (or models/ if no run name is given).
+        last.pt is also saved there.
     """
     dataloaders = prep_dataloaders(args, transforms)
     # Define the loss function, optimizer, and learning rate scheduler
@@ -233,10 +267,12 @@ def run_train(args, model, device, transforms):
         ckpt_dir = CKPT_DIR
     os.makedirs(ckpt_dir, exist_ok=True)
     settings = TrainSettings(device=device, ckpt_dir=ckpt_dir, n_epochs=args.n_epochs,
-                             early_stop_patience=args.early_stop_patience)
+                             early_stop_patience=args.early_stop_patience,
+                             resume=ckpt, run_info=vars(args))
 
     # Main training procedure
-    init_wandb(args)
+    run_id = ckpt["run_info"]["wandb_id"] if ckpt is not None else None
+    init_wandb(args, run_id)
     model.to(device)
     train(dataloaders, model, components, settings)
     wandb.finish()
@@ -283,11 +319,19 @@ def main(args):
     """
     Build the transforms and model, then run training or evaluation based on args.mode.
 
+    If --resume is given, loads that last.pt checkpoint first and restores the original
+    run's arguments with restore_args, so the transforms, model, and data match the
+    interrupted run; the checkpoint is then passed to run_train to continue training
+    from the next epoch. A resumed run always trains, since the restored mode is 'train'.
+
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
     """
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
+    ckpt = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        args = restore_args(args, ckpt)
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(args.model_type)
     transforms = compose_data_transforms(h, w, mean, std)
@@ -295,7 +339,7 @@ def main(args):
     model = build_model(args)
 
     if args.mode == 'train':
-        run_train(args, model, device, transforms)
+        run_train(args, model, device, transforms, ckpt)
     else:
         run_eval(args, model, device, transforms[1])
 
