@@ -90,6 +90,9 @@ def args_parser():
         --test_offsets: Fractional positions in [0, 1) within each temporal segment for
             test clips; more than one averages predictions over clips (multi-clip testing)
             (default 0.5).
+        --amp/--no-amp: Whether to train with automatic mixed precision (default False).
+            Uses bf16 on GPUs with native support (e.g. A100) and fp16 with a GradScaler
+            otherwise (e.g. T4).
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -141,6 +144,9 @@ def args_parser():
     parser.add_argument('--test_offsets', type=float, nargs='+', default=[0.5],
                         help='Fractional positions in [0, 1) within each segment for test '
                         'clips; more than one enables multi-clip testing')
+    parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=False,
+                        help='Use automatic mixed precision for training (bf16 on GPUs that '
+                        'support it natively, fp16 with gradient scaling otherwise)')
     return parser.parse_args()
 
 
@@ -193,6 +199,35 @@ def build_model(args):
                             freeze_layers=tuple(args.freeze_layers or ()))
         return LRCN(config)
     return build_r3d18(args.n_classes, args.dropout, args.pretrained)
+
+
+def setup_amp(args, device):
+    """
+    Choose the mixed-precision settings for training from --amp and the GPU's capabilities.
+
+    AMP is off when --amp is not given or when training on CPU. On GPUs with native bf16
+    support (compute capability 8.0 or higher, e.g. A100), uses bf16, which has the same
+    exponent range as fp32, so gradients do not underflow and no loss scaling is needed.
+    On older GPUs (e.g. T4), uses fp16 with an enabled GradScaler to keep small gradients
+    from underflowing to zero.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments (uses --amp).
+        device (torch.device): Device on which to train.
+
+    Returns:
+        tuple: (amp_dtype, scaler):
+            - amp_dtype (torch.dtype or None): torch.bfloat16 or torch.float16 for autocast,
+              or None when AMP is off.
+            - scaler (torch.amp.GradScaler): Enabled only for fp16; when disabled, its
+              scale/step/update calls pass through unchanged, so the training loop needs
+              no AMP-specific branches.
+    """
+    if not args.amp or device.type != "cuda":
+        return None, torch.amp.GradScaler("cuda", enabled=False)
+    if torch.cuda.get_device_capability(device)[0] >= 8:
+        return torch.bfloat16, torch.amp.GradScaler("cuda", enabled=False)
+    return torch.float16, torch.amp.GradScaler("cuda")
 
 
 def init_wandb(args, run_id=None):
@@ -273,8 +308,9 @@ def run_train(args, model, device, transforms, ckpt=None):
     # Define the loss function, optimizer, and learning rate scheduler
     non_frozen = [param for param in model.parameters() if param.requires_grad]
     opt = optim.AdamW(non_frozen, lr=args.learning_rate, weight_decay=args.weight_decay)
+    amp_dtype, scaler = setup_amp(args, device)
     components = TrainComponents(criterion=nn.CrossEntropyLoss(reduction='sum'),
-                                 optimizer=opt,
+                                 optimizer=opt, scaler=scaler,
                                  scheduler=ReduceLROnPlateau(opt, mode='min', factor=0.5,
                                                              patience=4))
     if args.run_name:
@@ -284,8 +320,7 @@ def run_train(args, model, device, transforms, ckpt=None):
     os.makedirs(ckpt_dir, exist_ok=True)
     settings = TrainSettings(device=device, ckpt_dir=ckpt_dir, n_epochs=args.n_epochs,
                              early_stop_patience=args.early_stop_patience,
-                             resume=ckpt, run_info=vars(args))
-
+                             resume=ckpt, run_info=vars(args), amp_dtype=amp_dtype)
     # Main training procedure
     run_id = ckpt["run_info"]["wandb_id"] if ckpt is not None else None
     init_wandb(args, run_id)
