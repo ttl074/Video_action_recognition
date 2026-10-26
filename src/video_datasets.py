@@ -35,43 +35,56 @@ def list_frames(folder):
     return sorted_files
 
 
-def sample_frame_paths(fr_paths,fr_per_vid,train, offset=0.5):
+def sample_frame_indices(n_frames, fr_per_vid, train, offset=0.5):
+    """
+    Select fr_per_vid frame indices from a video, one per equal-length temporal segment.
+
+    The frames are divided into fr_per_vid contiguous segments covering the whole video.
+    In training mode, one frame is drawn uniformly at random from each segment (temporal
+    jitter), so each epoch sees a different subset of every video. In evaluation mode,
+    the frame at fractional position offset within each segment is taken (the center by
+    default).
+
+    Args:
+        n_frames (int): Number of frames in the video.
+        fr_per_vid (int): Number of frames to select.
+        train (bool): If True, sample randomly within each segment; if False,
+            take the frame at offset within each segment.
+        offset (float): The fractional position within each segment for evaluation
+            (0.5 = center); must be in [0, 1) to stay inside the video.
+
+    Returns:
+        list[int]: fr_per_vid frame indices, in temporal order.
+    """
+    if train:
+        random_idx = []
+        for i in range(fr_per_vid):
+            start = i * n_frames // fr_per_vid
+            end = (i + 1) * n_frames // fr_per_vid
+            end = max(end, start + 1)
+            random_idx.append(random.randint(start, end - 1))
+        return random_idx
+    return ((np.arange(fr_per_vid) + offset) * (n_frames / fr_per_vid)).astype(int).tolist()
+
+
+def sample_frame_paths(fr_paths, fr_per_vid, train, offset=0.5):
     """
     Select fr_per_vid frame paths from a video, one per equal-length temporal segment.
 
-    The frame list is divided into fr_per_vid contiguous segments covering the whole video.
-    In training mode, one frame is drawn uniformly at random from each segment (temporal
-    jitter), so each epoch sees a different subset of every video. In evaluation mode, the
-    frame at fractional position offset within each segment is taken (the center by
-    default), so validation and test sampling is deterministic; different offsets give
-    different clips of the same video for multi-clip testing. If the video has fewer frames
-    than fr_per_vid, some frames are repeated, spread evenly across the clip. Selected paths
-    are always in temporal order.
+    Thin wrapper around sample_frame_indices that returns the paths at those indices.
 
     Args:
         fr_paths (list): Frame file paths for one video, sorted by frame number.
         fr_per_vid (int): Number of frames to select.
-        train (bool): If True, sample randomly within each segment; if False, take the
-            frame at offset within each segment.
-        offset (float): Fractional position within each segment used in evaluation mode
-            (0.5 = center; default). Must be in [0, 1). Ignored when train is True.
+        train (bool): If True, sample randomly within each segment; if False,
+            take the frame at offset within each segment.
+        offset (float): The fractional position within each segment for evaluation
+            (0.5 = center); must be in [0, 1) to stay inside the video.
 
     Returns:
         list: fr_per_vid frame paths, in temporal order.
     """
-    if train:
-        random_idx= []
-        for i in range(fr_per_vid):
-            start = i*len(fr_paths)//fr_per_vid
-            end = (i+1)*len(fr_paths)//fr_per_vid
-            end = max(end, start + 1)
-            idx = random.randint(start,end-1)
-            random_idx.append(idx)
-        fr_paths = [fr_paths[i] for i in random_idx]
-        return fr_paths
-    centers = ((np.arange(fr_per_vid)+offset)*(len(fr_paths)/fr_per_vid)).astype(int)
-    fr_paths = [fr_paths[i] for i in centers]
-    return fr_paths
+    return [fr_paths[i] for i in sample_frame_indices(len(fr_paths), fr_per_vid, train, offset)]
 
 
 def get_group(vid_path):
@@ -109,8 +122,8 @@ class VideoDataset(Dataset):
         fr_per_vid (int): Number of frames sampled from each video folder per clip, one per
             equal-length temporal segment (see sample_frame_paths).
         train (bool): If True, frames are sampled at random positions within each segment
-            (temporal jitter for training); if False, the frame at offset within each
-            segment is used, so validation and test clips are deterministic.
+            (temporal jitter for training); if False, segment centers are used so validation
+            and test clips are deterministic.
         transforms (callable, optional): A clip-level torchvision.transforms.v2 pipeline that
             is called once on the list of PIL frames, so random augmentations are applied
             identically to every frame in the clip. If None, frames are only converted to
@@ -129,10 +142,28 @@ class VideoDataset(Dataset):
         """Return the number of video samples in the dataset."""
         return len(self.dataset)
 
+    def _load_clip(self, fr_paths):
+        """
+        Open the given frames and apply the clip-level transforms to all of them at once.
+
+        Args:
+            fr_paths (list): Frame file paths, in the order they should appear in the clip.
+
+        Returns:
+            torch.Tensor: Tensor of shape (len(fr_paths), C, H, W), or an empty list if
+                fr_paths is empty.
+        """
+        fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
+        # Apply the clip-level transforms once to all frames, else just convert to tensors
+        fr_imgs_trans = self.transforms(fr_imgs) if self.transforms else v2.ToImage()(fr_imgs)
+        if len(fr_imgs_trans) > 0:
+            fr_imgs_trans = torch.stack(fr_imgs_trans)
+        return fr_imgs_trans
+
     def __getitem__(self, idx):
         """
-        Load frames from the video directory corresponding to the given index, apply
-        transform to entire clip, and return the stacked tensor of frames along with its label.
+        Load the sampled frames of the video at the given index, apply the transforms to the
+        entire clip, and return the stacked tensor of frames along with its label.
 
         Args:
             idx (int): Index of the sample.
@@ -141,19 +172,43 @@ class VideoDataset(Dataset):
             tuple: (frames_tensor, label) where frames_tensor is a tensor of shape (T, C, H, W)
                    with T equal to fr_per_vid, and label is an integer.
         """
-        # Get all JPEG frame paths from the video directory, in frame order
+        fr_paths = sample_frame_paths(list_frames(self.dataset[idx][0]), self.fpv,
+                                      self.train, self.offset)
+        return self._load_clip(fr_paths), self.dataset[idx][1]
+
+
+class DiffVideoDataset(VideoDataset):  # pylint: disable=too-few-public-methods
+    """
+    VideoDataset variant that returns RGB differences between adjacent frames.
+
+    Frame positions are sampled exactly as in VideoDataset. For each sampled frame i, the
+    next frame i + 1 is also loaded (the last frame is paired with itself, giving a zero
+    difference), and the clip returned is frame(i + 1) - frame(i) for every sampled i. Static
+    content cancels to about zero, so the clip mainly shows where things moved.
+
+    All 2 * fr_per_vid frames go through the transforms in a single call, so the current and
+    next frames receive identical crops, flips, and color jitter before being subtracted.
+    Normalize is linear, so the mean cancels and differences are simply scaled by 1/std.
+
+    Takes the same arguments as VideoDataset.
+    """
+    def __getitem__(self, idx):
+        """
+        Load the sampled frames and their next frames, and return their differences.
+
+        Args:
+            idx (int): Index of the sample.
+
+        Returns:
+            tuple: (diff_tensor, label) where diff_tensor is a float tensor of shape
+                (T, C, H, W) with T equal to fr_per_vid, and label is an integer.
+        """
         fr_paths = list_frames(self.dataset[idx][0])
-        fr_paths = sample_frame_paths(fr_paths, self.fpv, self.train, self.offset)
-        # Open images using PIL
-        fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
-        # Get the label associated with the video
-        fr_label = self.dataset[idx][1]
-        # Apply the clip-level transforms once to all frames, else just convert to tensors
-        fr_imgs_trans = self.transforms(fr_imgs) if self.transforms else v2.ToImage()(fr_imgs)
-        # Stack transformed images into a tensor if available
-        if len(fr_imgs_trans) > 0:
-            fr_imgs_trans = torch.stack(fr_imgs_trans)
-        return fr_imgs_trans, fr_label
+        cur_idx = sample_frame_indices(len(fr_paths), self.fpv, self.train, self.offset)
+        next_idx = [min(i + 1, len(fr_paths) - 1) for i in cur_idx]
+        clip = self._load_clip([fr_paths[i] for i in cur_idx + next_idx]).float()
+        n_sampled = len(cur_idx)
+        return clip[n_sampled:] - clip[:n_sampled], self.dataset[idx][1]
 
 
 def load_dataset(frame_dir):

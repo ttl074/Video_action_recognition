@@ -39,7 +39,7 @@ from torch import nn
 from torch import optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from video_datasets import VideoDataset, load_dataset, dataset_split
+from video_datasets import VideoDataset, DiffVideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN, LRCNConfig, build_r3d18
 from train import train, TrainComponents, TrainSettings
@@ -48,6 +48,8 @@ from evaluate import test, get_test_report, get_confusion_matrix, predict_probs
 WANDB_PROJECT = "Video_Action_Recognition"
 CKPT_DIR = "./models"
 SPLITS_PATH = "./splits.npy"
+# Dataset class for each --input_mode
+DATASET_CLASSES = {"rgb": VideoDataset, "diff": DiffVideoDataset}
 
 
 def args_parser():
@@ -93,6 +95,8 @@ def args_parser():
         --amp/--no-amp: Whether to train with automatic mixed precision (default False).
             Uses bf16 on GPUs with native support (e.g. A100) and fp16 with a GradScaler
             otherwise (e.g. T4).
+        --input_mode: Model input: 'rgb' frames or 'diff' (differences between adjacent
+            frames, a cheap motion signal) (default 'rgb').
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -147,6 +151,8 @@ def args_parser():
     parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=False,
                         help='Use automatic mixed precision for training (bf16 on GPUs that '
                         'support it natively, fp16 with gradient scaling otherwise)')
+    parser.add_argument('--input_mode', choices=['rgb', 'diff'], default='rgb',
+                        help="Model input: 'rgb' frames or 'diff' (adjacent-frame differences)")
     return parser.parse_args()
 
 
@@ -253,7 +259,8 @@ def prep_dataloaders(args, transforms):
     Splits the videos into train/validation/test sets by group, saves all three splits to
     SPLITS_PATH (later read by run_eval), and builds the training and validation
     DataLoaders. The training dataset samples one frame at a random position within each
-    temporal segment; the validation dataset uses segment centers.
+    temporal segment; the validation dataset uses segment centers. With --input_mode diff,
+    both return differences between each sampled frame and the next one instead of frames.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
@@ -275,8 +282,10 @@ def prep_dataloaders(args, transforms):
                           'test': np.array(ts_split)})
 
     # Create PyTorch Datasets and DataLoaders for train and validation
-    tr_dataset = VideoDataset(tr_split, args.fr_per_vid, True, tr_transforms)
-    val_dataset = VideoDataset(val_split, args.fr_per_vid, False, val_ts_transforms)
+    tr_dataset = DATASET_CLASSES[args.input_mode](tr_split, args.fr_per_vid, True,
+                                                  tr_transforms)
+    val_dataset = DATASET_CLASSES[args.input_mode](val_split, args.fr_per_vid, False,
+                                                   val_ts_transforms)
     dataloaders = train_val_dloaders(tr_dataset, val_dataset,
                                      args.batch_size, args.model_type, args.num_workers)
     return dataloaders
@@ -339,8 +348,8 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     for each video is the class with the highest averaged probability.
 
     Args:
-        args (argparse.Namespace): Parsed arguments; uses test_offsets, fr_per_vid,
-            batch_size, model_type, and num_workers.
+        args (argparse.Namespace): Parsed arguments; uses test_offsets, input_mode,
+            fr_per_vid, batch_size, model_type, and num_workers.
         model (torch.nn.Module): Model with the checkpoint already loaded.
         device (torch.device): Device to run inference on.
         ts_split (list): Test samples as (frame_dir, label) tuples.
@@ -367,7 +376,8 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     for offset in args.test_offsets:
         if offset >= 1.0 or offset < 0.0:
             raise ValueError(f"Offset must be in [0.0, 1.0), got {offset}")
-        vd = VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms, offset=offset)
+        vd = DATASET_CLASSES[args.input_mode](ts_split, args.fr_per_vid, False,
+                                              val_ts_transforms, offset=offset)
         dataloader = test_dloaders(vd, args.batch_size, args.model_type,
                                    args.num_workers)['test']
         labels, prob = predict_probs(model, dataloader, device)
@@ -392,8 +402,8 @@ def run_eval(args, model, device, val_ts_transforms):
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments (uses --ckpt,
-            --test_offsets, --fr_per_vid, --batch_size, --model_type, --num_workers,
-            and --frame_dir).
+            --test_offsets, --input_mode, --fr_per_vid, --batch_size, --model_type,
+            --num_workers, and --frame_dir).
         model (torch.nn.Module): A model with the same architecture as the checkpoint.
         device (torch.device): Device (CPU or GPU) on which to evaluate.
         val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
@@ -422,8 +432,8 @@ def run_eval(args, model, device, val_ts_transforms):
         suffix = ""
         # Create PyTorch Dataset and DataLoader for the test set
         dataloaders = test_dloaders(
-            VideoDataset(ts_split, args.fr_per_vid, False, val_ts_transforms,
-                         offset=args.test_offsets[0]),
+            DATASET_CLASSES[args.input_mode](ts_split, args.fr_per_vid, False,
+                                             val_ts_transforms, offset=args.test_offsets[0]),
             args.batch_size, args.model_type, args.num_workers)
         targets, outputs, accuracy, loss = test(model, dataloaders['test'], device,
                                                 nn.CrossEntropyLoss(reduction='sum'))
