@@ -97,6 +97,8 @@ def args_parser():
             otherwise (e.g. T4).
         --input_mode: Model input: 'rgb' frames or 'diff' (differences between adjacent
             frames, a cheap motion signal) (default 'rgb').
+        --save_probs: Eval only; path of a .npz file to save the test softmax probabilities
+            and labels to, for ensembling models later (default None, not saved).
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -153,6 +155,8 @@ def args_parser():
                         'support it natively, fp16 with gradient scaling otherwise)')
     parser.add_argument('--input_mode', choices=['rgb', 'diff'], default='rgb',
                         help="Model input: 'rgb' frames or 'diff' (adjacent-frame differences)")
+    parser.add_argument('--save_probs', default=None,
+                        help='Eval only: .npz path to save test probabilities and labels to')
     return parser.parse_args()
 
 
@@ -345,11 +349,13 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     For each offset in args.test_offsets, samples one clip per video at that position
     within each temporal segment, runs the model, and prints that clip's own accuracy.
     The softmax probabilities are then averaged across clips, and the final prediction
-    for each video is the class with the highest averaged probability.
+    for each video is the class with the highest averaged probability. With a single
+    offset this is ordinary single-clip testing. If args.save_probs is set, the averaged
+    probabilities and the labels are saved there with np.savez (keys 'probs', 'labels').
 
     Args:
         args (argparse.Namespace): Parsed arguments; uses test_offsets, input_mode,
-            fr_per_vid, batch_size, model_type, and num_workers.
+            fr_per_vid, batch_size, model_type, num_workers, and save_probs.
         model (torch.nn.Module): Model with the checkpoint already loaded.
         device (torch.device): Device to run inference on.
         ts_split (list): Test samples as (frame_dir, label) tuples.
@@ -387,6 +393,10 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     preds = stacked_avg.argmax(axis=1).tolist()
     avg_acc = (np.array(preds) == np.array(labels)).mean()
     avg_loss = -np.log(stacked_avg[np.arange(len(labels)), labels] + 1e-12).mean()
+    if args.save_probs:
+        os.makedirs(os.path.dirname(args.save_probs) or '.', exist_ok=True)
+        np.savez(args.save_probs, probs=stacked_avg, labels=np.array(labels))
+        print(f"Saved test probabilities to {args.save_probs}")
     return labels, preds, avg_acc, avg_loss
 
 
@@ -398,12 +408,13 @@ def run_eval(args, model, device, val_ts_transforms):
     video, sampled at that position within each temporal segment (default 0.5, the
     segment center). With more than one, runs multi-clip testing via multiclip_eval:
     one clip per offset, with softmax probabilities averaged across clips before taking
-    the prediction.
+    the prediction. With --save_probs, multiclip_eval is used even for a single offset
+    (same accuracy), since it is the path that keeps the probabilities.
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments (uses --ckpt,
             --test_offsets, --input_mode, --fr_per_vid, --batch_size, --model_type,
-            --num_workers, and --frame_dir).
+            --num_workers, --save_probs, and --frame_dir).
         model (torch.nn.Module): A model with the same architecture as the checkpoint.
         device (torch.device): Device (CPU or GPU) on which to evaluate.
         val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
@@ -424,12 +435,11 @@ def run_eval(args, model, device, val_ts_transforms):
     model.to(device)
 
     init_wandb(args)
-    if len(args.test_offsets) > 1:
-        suffix = "_multiclip"
+    suffix = "_multiclip" if len(args.test_offsets) > 1 else ""
+    if len(args.test_offsets) > 1 or args.save_probs:
         targets, outputs, accuracy, loss = multiclip_eval(
             args, model, device, ts_split, val_ts_transforms)
     else:
-        suffix = ""
         # Create PyTorch Dataset and DataLoader for the test set
         dataloaders = test_dloaders(
             DATASET_CLASSES[args.input_mode](ts_split, args.fr_per_vid, False,
