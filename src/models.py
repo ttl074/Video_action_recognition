@@ -20,6 +20,8 @@ Classes:
         and a final fully-connected layer to produce class logits.
 
 Functions:
+    adapt_conv1: Replace a ResNet's first conv so it accepts a multiple of 3 input channels,
+        initialized from its RGB weights (cross-modality initialization).
     key_translation: Map an R3D-18 state-dict key to the matching ResNet18 key.
     inflate_conv_weight: Turn a 2D conv weight into a 3D one by repeating it along time
         and dividing by the temporal size.
@@ -28,11 +30,13 @@ Functions:
 """
 
 from dataclasses import dataclass
+import torch
 from torch import nn
 from torchvision import models
 
+
 @dataclass
-class LRCNConfig:
+class LRCNConfig:  # pylint: disable=too-many-instance-attributes
     """
     Hyperparameters for building an LRCN model.
 
@@ -45,6 +49,8 @@ class LRCNConfig:
         cnn_model (str): ResNet variant for the backbone ('resnet18' ... 'resnet152').
         freeze_layers (tuple): Names of ResNet stages whose weights are frozen and
                                 BatchNorm statistics are also held fixed
+        in_channels (int): Channels per input frame: 3 for RGB or single differences,
+            3 * stack for stacked differences (default 3). Must be a multiple of 3.
     """
     hidden_size: int
     n_layers: int
@@ -53,6 +59,35 @@ class LRCNConfig:
     pretrained: bool = True
     cnn_model: str = 'resnet34'
     freeze_layers: tuple = ()
+    in_channels: int = 3
+
+
+def adapt_conv1(cnn, in_channels):
+    """
+    Replace a ResNet's first conv layer so it accepts in_channels input channels.
+
+    The new conv keeps the original kernel size, stride, and padding. Its weight is the
+    original RGB weight repeated in_channels // 3 times along the input-channel axis and
+    divided by that number, so on an input made of identical 3-channel blocks it responds
+    exactly like the original conv on one block (cross-modality initialization, as in TSN).
+    The pretrained features of the following layers stay usable from the first step.
+
+    Args:
+        cnn (torchvision.models.ResNet): Backbone whose conv1 is replaced in place.
+        in_channels (int): Number of input channels; must be a positive multiple of 3.
+
+    Raises:
+        ValueError: If in_channels is not a positive multiple of 3.
+    """
+    if in_channels <= 0 or in_channels % 3:
+        raise ValueError(f"in_channels must be a positive multiple of 3, got {in_channels}")
+    old = cnn.conv1
+    reps = in_channels // 3
+    cnn.conv1 = nn.Conv2d(in_channels, old.out_channels, kernel_size=old.kernel_size,
+                          stride=old.stride, padding=old.padding, bias=False)
+    with torch.no_grad():
+        cnn.conv1.weight.copy_(old.weight.repeat(1, reps, 1, 1) / reps)
+
 
 class Identity(nn.Module):
     """
@@ -80,6 +115,7 @@ class Identity(nn.Module):
         """
         return x
 
+
 class LRCN(nn.Module):
     """
     LRCN (Long-term Recurrent Convolutional Network) for video classification.
@@ -92,11 +128,13 @@ class LRCN(nn.Module):
     Args:
         config (LRCNConfig): Model hyperparameters (LSTM hidden size and number of layers,
             dropout rate, number of classes, whether to use ImageNet-pretrained weights,
-            which ResNet variant to use as the backbone, and which backbone stages to
-            freeze). See LRCNConfig for details.
+            which ResNet variant to use as the backbone, which backbone stages to
+            freeze, and the number of input channels per frame). See LRCNConfig for
+            details.
 
     Raises:
-        ValueError: If config.cnn_model is not a supported ResNet variant.
+        ValueError: If config.cnn_model is not a supported ResNet variant, or
+            config.in_channels is not a positive multiple of 3.
     """
 
     def __init__(self, config):
@@ -117,6 +155,10 @@ class LRCN(nn.Module):
         else:
             raise ValueError('The input CNN backbone is not supported, '
                              'please choose a valid ResNet variant.')
+
+        # Widen the first conv for stacked-difference inputs (more than 3 channels per frame)
+        if config.in_channels != 3:
+            adapt_conv1(base_cnn, config.in_channels)
 
         # Retrieve the number of features output by the CNN's original fully-connected layer.
         num_features = base_cnn.fc.in_features
@@ -158,13 +200,13 @@ class LRCN(nn.Module):
         """
         bs, ts, c, h, w = x.shape  # batch_size, time_steps, channels, height, width
         # (B*T, C, H, W)
-        x_merge = x.reshape(bs*ts,c,h,w)
+        x_merge = x.reshape(bs * ts, c, h, w)
         # (B*T, F)
         y_merge = self.base_model(x_merge)
         # (B, T, F)
-        y = y_merge.reshape(bs,ts,-1)
+        y = y_merge.reshape(bs, ts, -1)
         # (B, T, Hidden)
-        out,_ = self.rnn(y)
+        out, _ = self.rnn(y)
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
         # Pass the final output through the fully-connected layer to get class logits.
@@ -211,12 +253,12 @@ def key_translation(key):
         str: The matching ResNet18 key, e.g. 'layer1.0.bn1.weight'.
     """
     translations = {
-        'stem.0.':'conv1.',
-        'stem.1.':'bn1.',
-        '.conv1.0.':'.conv1.',
-        '.conv1.1.':'.bn1.',
-        '.conv2.0.':'.conv2.',
-        '.conv2.1.':'.bn2.'
+        'stem.0.': 'conv1.',
+        'stem.1.': 'bn1.',
+        '.conv1.0.': '.conv1.',
+        '.conv1.1.': '.bn1.',
+        '.conv2.0.': '.conv2.',
+        '.conv2.1.': '.bn2.'
     }
     for r3d, resnet in translations.items():
         key = key.replace(r3d, resnet)

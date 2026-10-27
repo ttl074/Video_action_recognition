@@ -179,36 +179,53 @@ class VideoDataset(Dataset):
 
 class DiffVideoDataset(VideoDataset):  # pylint: disable=too-few-public-methods
     """
-    VideoDataset variant that returns RGB differences between adjacent frames.
+    VideoDataset variant that returns stacked RGB differences between consecutive frames.
 
-    Frame positions are sampled exactly as in VideoDataset. For each sampled frame i, the
-    next frame i + 1 is also loaded (the last frame is paired with itself, giving a zero
-    difference), and the clip returned is frame(i + 1) - frame(i) for every sampled i. Static
-    content cancels to about zero, so the clip mainly shows where things moved.
+    Frame positions are sampled exactly as in VideoDataset. At each sampled frame i, the
+    stack consecutive differences frame(i + 1) - frame(i), ..., frame(i + stack) -
+    frame(i + stack - 1) are computed and concatenated along the channel axis, so every time
+    step carries a short window of motion. Frame indices past the end of the video are capped
+    at the last frame, which gives zero differences there. Static content cancels to about
+    zero, so the clip mainly shows where things moved. With stack=1 this is the plain
+    adjacent-frame difference.
 
-    All 2 * fr_per_vid frames go through the transforms in a single call, so the current and
-    next frames receive identical crops, flips, and color jitter before being subtracted.
+    All fr_per_vid * (stack + 1) frames go through the transforms in a single call, so every
+    frame receives identical crops, flips, and color jitter before being subtracted.
     Normalize is linear, so the mean cancels and differences are simply scaled by 1/std.
 
-    Takes the same arguments as VideoDataset.
+    Args:
+        vid_dataset, fr_per_vid, train, transforms: As in VideoDataset.
+        offset (float): As in VideoDataset (keyword-only).
+        stack (int): Number of consecutive differences per sampled position (keyword-only,
+            default 1). Each time step has 3 * stack channels.
     """
+    # pylint: disable-next=too-many-arguments
+    def __init__(self, vid_dataset, fr_per_vid, train, transforms=None, *, offset=0.5, stack=1):
+        super().__init__(vid_dataset, fr_per_vid, train, transforms, offset)
+        self.stack = stack
+
     def __getitem__(self, idx):
         """
-        Load the sampled frames and their next frames, and return their differences.
+        Load each sampled frame and the stack frames after it, and return their differences.
 
         Args:
             idx (int): Index of the sample.
 
         Returns:
             tuple: (diff_tensor, label) where diff_tensor is a float tensor of shape
-                (T, C, H, W) with T equal to fr_per_vid, and label is an integer.
+                (T, 3 * stack, H, W) with T equal to fr_per_vid, and label is an integer.
         """
         fr_paths = list_frames(self.dataset[idx][0])
-        cur_idx = sample_frame_indices(len(fr_paths), self.fpv, self.train, self.offset)
-        next_idx = [min(i + 1, len(fr_paths) - 1) for i in cur_idx]
-        clip = self._load_clip([fr_paths[i] for i in cur_idx + next_idx]).float()
-        n_sampled = len(cur_idx)
-        return clip[n_sampled:] - clip[:n_sampled], self.dataset[idx][1]
+        last = len(fr_paths) - 1
+        starts = sample_frame_indices(len(fr_paths), self.fpv, self.train, self.offset)
+        # Position-major order: [i, i+1, ..., i+stack] for each sampled i
+        frame_idx = [min(i + k, last) for i in starts for k in range(self.stack + 1)]
+        clip = self._load_clip([fr_paths[i] for i in frame_idx]).float()
+        # (T, stack + 1, C, H, W) -> consecutive differences (T, stack, C, H, W)
+        clip = clip.reshape(len(starts), self.stack + 1, *clip.shape[1:])
+        diffs = clip[:, 1:] - clip[:, :-1]
+        # Concatenate the stack differences along channels: (T, stack * C, H, W)
+        return diffs.flatten(1, 2), self.dataset[idx][1]
 
 
 def load_dataset(frame_dir):

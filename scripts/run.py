@@ -50,8 +50,6 @@ from evaluate import test, get_test_report, get_confusion_matrix, predict_probs
 WANDB_PROJECT = "Video_Action_Recognition"
 CKPT_DIR = "./models"
 SPLITS_PATH = "./splits.npy"
-# Dataset class for each --input_mode
-DATASET_CLASSES = {"rgb": VideoDataset, "diff": DiffVideoDataset}
 
 
 def args_parser():
@@ -101,6 +99,8 @@ def args_parser():
             frames, a cheap motion signal) (default 'rgb').
         --save_probs: Eval only; path of a .npz file to save the evaluated split's softmax
             probabilities and labels to, for ensembling models later (default None).
+        --diff_stack: Number of consecutive frame differences stacked as channels at each
+            sampled position; with --input_mode diff only (default 1).
         --split: Eval only; which saved split to evaluate: 'test' or 'val' (default 'test').
             Use 'val' to choose ensemble settings without looking at test results.
     """
@@ -161,6 +161,8 @@ def args_parser():
                         help="Model input: 'rgb' frames or 'diff' (adjacent-frame differences)")
     parser.add_argument('--save_probs', default=None,
                         help='Eval only: .npz path to save probabilities and labels to')
+    parser.add_argument('--diff_stack', type=int, default=1,
+                        help='Consecutive differences stacked per position (--input_mode diff)')
     parser.add_argument('--split', choices=['test', 'val'], default='test',
                         help="Eval only: saved split to evaluate ('test' or 'val')")
     return parser.parse_args()
@@ -197,7 +199,8 @@ def build_model(args):
     Build the model selected by --model_type from the command-line arguments.
 
     For 'lrcn', builds an LRCN from the RNN, backbone, dropout, pretrained, and
-    freeze_layers arguments. For '3dcnn', builds an R3D-18 with build_r3d18, which uses only
+    freeze_layers arguments; with --input_mode diff, its first conv takes 3 * diff_stack
+    channels per frame. For '3dcnn', builds an R3D-18 with build_r3d18, which uses only
     n_classes, dropout, and pretrained (inflated ImageNet ResNet18 weights); the backbone,
     RNN, and freeze_layers arguments are ignored.
 
@@ -207,14 +210,43 @@ def build_model(args):
     Returns:
         torch.nn.Module: An LRCN or an R3D-18 (VideoResNet) model, untrained or initialized
             from ImageNet weights.
+
+    Raises:
+        ValueError: If stacked differences (diff_stack > 1) are requested for '3dcnn'.
     """
+    in_channels = 3 * args.diff_stack if args.input_mode == 'diff' else 3
     if args.model_type == 'lrcn':
         config = LRCNConfig(hidden_size=args.rnn_hidden_size, n_layers=args.rnn_n_layers,
                             dropout_rate=args.dropout, n_classes=args.n_classes,
                             pretrained=args.pretrained, cnn_model=args.cnn_backbone,
-                            freeze_layers=tuple(args.freeze_layers or ()))
+                            freeze_layers=tuple(args.freeze_layers or ()),
+                            in_channels=in_channels)
         return LRCN(config)
+    if in_channels != 3:
+        raise ValueError("Stacked differences (--diff_stack > 1) are only supported for lrcn")
     return build_r3d18(args.n_classes, args.dropout, args.pretrained)
+
+
+def make_dataset(args, samples, training, transforms, offset=0.5):
+    """
+    Build the Dataset for the selected --input_mode.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments (uses input_mode,
+            fr_per_vid, and diff_stack).
+        samples (list): (frame_dir, label) tuples to include.
+        training (bool): Training mode (random position per segment) or evaluation mode.
+        transforms (callable): Clip-level transforms from compose_data_transforms.
+        offset (float): Position within each segment in evaluation mode (default 0.5).
+
+    Returns:
+        VideoDataset: A VideoDataset of RGB frames, or a DiffVideoDataset of (stacked)
+            frame differences when --input_mode is 'diff'.
+    """
+    if args.input_mode == 'diff':
+        return DiffVideoDataset(samples, args.fr_per_vid, training, transforms, offset=offset,
+                                stack=args.diff_stack)
+    return VideoDataset(samples, args.fr_per_vid, training, transforms, offset=offset)
 
 
 def setup_amp(args, device):
@@ -292,10 +324,8 @@ def prep_dataloaders(args, transforms):
                           'test': np.array(ts_split)})
 
     # Create PyTorch Datasets and DataLoaders for train and validation
-    tr_dataset = DATASET_CLASSES[args.input_mode](tr_split, args.fr_per_vid, True,
-                                                  tr_transforms)
-    val_dataset = DATASET_CLASSES[args.input_mode](val_split, args.fr_per_vid, False,
-                                                   val_ts_transforms)
+    tr_dataset = make_dataset(args, tr_split, True, tr_transforms)
+    val_dataset = make_dataset(args, val_split, False, val_ts_transforms)
     dataloaders = train_val_dloaders(tr_dataset, val_dataset,
                                      args.batch_size, args.model_type, args.num_workers)
     return dataloaders
@@ -405,8 +435,7 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     for offset in args.test_offsets:
         if offset >= 1.0 or offset < 0.0:
             raise ValueError(f"Offset must be in [0.0, 1.0), got {offset}")
-        vd = DATASET_CLASSES[args.input_mode](ts_split, args.fr_per_vid, False,
-                                              val_ts_transforms, offset=offset)
+        vd = make_dataset(args, ts_split, False, val_ts_transforms, offset)
         dataloader = test_dloaders(vd, args.batch_size, args.model_type,
                                    args.num_workers)['test']
         labels, prob = predict_probs(model, dataloader, device)
@@ -469,8 +498,7 @@ def run_eval(args, model, device, val_ts_transforms):
     else:
         # Create PyTorch Dataset and DataLoader for the test set
         dataloaders = test_dloaders(
-            DATASET_CLASSES[args.input_mode](ts_split, args.fr_per_vid, False,
-                                             val_ts_transforms, offset=args.test_offsets[0]),
+            make_dataset(args, ts_split, False, val_ts_transforms, args.test_offsets[0]),
             args.batch_size, args.model_type, args.num_workers)
         targets, outputs, accuracy, loss = test(model, dataloaders['test'], device,
                                                 nn.CrossEntropyLoss(reduction='sum'))
