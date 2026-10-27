@@ -18,6 +18,7 @@ RGB-only LRCN.
 - [Video Action Recognition on UCF50](#video-action-recognition-on-ucf50)
   - [Contents](#contents)
   - [Results](#results)
+  - [Experiment tracking](#experiment-tracking)
   - [Method](#method)
     - [Evaluation protocol](#evaluation-protocol)
     - [Model](#model)
@@ -60,6 +61,23 @@ Key observations:
   ones (Biking, Drumming, MilitaryParade), so the two streams' errors barely overlap.
 - **Fusion gives the largest gain** (+4.5 points over RGB alone): for each video, the stream
   suited to that class tends to be the more confident one.
+
+---
+
+## Experiment tracking
+
+All training, evaluation, and fusion runs are logged to Weights & Biases:
+[Video_Action_Recognition](https://wandb.ai/ttl074-johns-hopkins-university/Video_Action_Recognition)
+
+- **Training runs** log per-epoch `train/loss`, `train/acc`, `val/loss`, `val/acc`, and the
+  learning rate; each run's summary records `best_epoch` and `best_val_acc`, and its
+  **Config** tab lists the exact arguments it was launched with.
+- **Evaluation runs** log `test/acc` and `test/loss` (single clip), `test/acc_multiclip` and
+  `test/loss_multiclip` (multi-clip), or `val_eval/...` when evaluating the validation split.
+- **The fusion run** (`fusion_rgb_diff3`) logs the fused test and validation accuracy, the
+  fusion weight and the probability files used, a per-class precision/recall/F1 table, the full
+  50 x 50 confusion matrix, and the four `.npz` probability files as an artifact
+  (`fusion_probs`).
 
 ---
 
