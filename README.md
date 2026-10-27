@@ -19,6 +19,12 @@ RGB-only LRCN.
   - [Contents](#contents)
   - [Results](#results)
   - [Experiment tracking](#experiment-tracking)
+  - [Changes from the starter code](#changes-from-the-starter-code)
+    - [Evaluation protocol and data](#evaluation-protocol-and-data)
+    - [Models](#models)
+    - [Training](#training)
+    - [Evaluation](#evaluation)
+    - [Code quality](#code-quality)
   - [Method](#method)
     - [Evaluation protocol](#evaluation-protocol)
     - [Model](#model)
@@ -26,7 +32,7 @@ RGB-only LRCN.
     - [Fusion](#fusion)
   - [Setup](#setup)
   - [Data preparation](#data-preparation)
-  - [Training](#training)
+  - [Training](#training-1)
   - [Evaluation and fusion](#evaluation-and-fusion)
   - [Command-line options](#command-line-options)
   - [Tests](#tests)
@@ -78,6 +84,60 @@ All training, evaluation, and fusion runs are logged to Weights & Biases:
   fusion weight and the probability files used, a per-class precision/recall/F1 table, the full
   50 x 50 confusion matrix, and the four `.npz` probability files as an artifact
   (`fusion_probs`).
+
+---
+
+## Changes from the starter code
+
+The project started from an LRCN template (ResNet34 + LSTM, a fixed number of frames per video,
+a stratified random split, Adam). The main changes, grouped by area:
+
+### Evaluation protocol and data
+
+- **Group-held-out split instead of a random split.** Clips from the same UCF50 group share the
+  actor, background, and camera, so a random split leaks near-duplicate clips into the test set.
+  Whole groups are now assigned to train, validation, or test (`dataset_split`), and a test
+  checks that no group appears in more than one split.
+- **All frames extracted, sampled per segment.** Every frame of each video is stored, and each
+  clip takes one frame per equal-length temporal segment: at a random position in training
+  (temporal jitter, so each epoch sees different frames) and at a fixed position in evaluation.
+- **Clip-level augmentation.** Random crop, flip, and color jitter are drawn once per clip and
+  applied to every frame; previously each frame was transformed independently.
+- **Collate fix.** Empty clips are filtered together with their labels, so clips and labels
+  can no longer fall out of alignment.
+
+### Models
+
+- **Stronger backbone and larger LSTM:** ResNet50 with ImageNet V2 weights and a 512-unit LSTM
+  (from ResNet34 and 100 units), plus optional freezing of backbone stages, with frozen
+  BatchNorm layers kept in eval mode.
+- **RGB-difference motion stream:** a dataset variant that returns stacked differences of
+  consecutive frames, and a widened first convolution initialized from the RGB weights.
+- **Two-stream late fusion:** averaging the RGB and motion streams' probabilities, with the
+  weight chosen on validation (+4.5 points over RGB alone).
+- **R3D-18 option:** a 3D CNN initialized by inflating ImageNet ResNet18 weights along time.
+
+### Training
+
+- **AdamW** with decoupled weight decay, a `ReduceLROnPlateau` scheduler, early stopping on
+  validation loss, checkpoint selection by validation accuracy, and reloading of the best
+  weights when the learning rate drops.
+- **Mixed precision** (`--amp`; bf16 or fp16 with loss scaling), about 2x faster training.
+- **Resumable runs:** a `last.pt` checkpoint saved atomically every epoch (model, optimizer,
+  scheduler, scaler, progress), with the original arguments and W&B run restored on resume.
+- **Weights & Biases logging** of all runs.
+
+### Evaluation
+
+- **Multi-clip testing** (`--test_offsets`), validation-split evaluation (`--split val`), and
+  saved probabilities (`--save_probs`) for fusion.
+- Per-class classification reports and confusion matrices.
+
+### Code quality
+
+- A pytest suite covering the dataset, frame sampling, augmentation consistency, split leakage,
+  and model behavior.
+- Docstrings throughout, checked with pylint.
 
 ---
 
