@@ -1,169 +1,288 @@
-# Video Classification with HMDB51
+# Video Action Recognition on UCF50
 
-This project implements a video classification pipeline using the HMDB51 dataset. It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. The project includes scripts for preprocessing, training, and testing the model.
+Tian Liu
 
----
+Action recognition on [UCF50](https://www.crcv.ucf.edu/data/UCF50.php) with LRCN models (a ResNet
+frame encoder followed by an LSTM), evaluated on a strict group-held-out split. The final model
+is a two-stream LRCN: one stream sees RGB frames, the other sees stacked differences between
+consecutive frames (a cheap motion signal), and their predicted class probabilities are
+averaged.
 
-## Table of Contents
-
-- [Dataset Preparation](#dataset-preparation)
-- [Environment Setup](#environment-setup)
-- [Preprocessing and Frame Extraction](#preprocessing-and-frame-extraction)
-- [Training the Model](#training-the-model)
-- [Testing and Evaluation](#testing-and-evaluation)
-- [Project Structure](#project-structure)
-- [Customization and Hyperparameters](#customization-and-hyperparameters)
+**Result: 93.88% test accuracy** (two-stream fusion), compared with 89.43% for the best
+RGB-only LRCN.
 
 ---
 
-## Dataset Preparation
+## Contents
 
-### Step 0: Download and Unzip Dataset
-
-1. **Download Dataset:**  
-   Download the HMDB51 dataset from [Kaggle](https://www.kaggle.com/datasets/easonlll/hmdb51). This dataset contains videos of 51 different human action classes.
-
-2. **Unzip and Organize:**  
-   Unzip the downloaded dataset. The expected folder structure should be as follows:
-   
-        - HMDB51
-            - Action_Class1
-            - Action_Class2
-            ... ... ... ...
-            - Action_Class51
-
-Each subdirectory represents a different action class.
+- [Video Action Recognition on UCF50](#video-action-recognition-on-ucf50)
+  - [Contents](#contents)
+  - [Results](#results)
+  - [Method](#method)
+    - [Evaluation protocol](#evaluation-protocol)
+    - [Model](#model)
+    - [RGB-difference (motion) stream](#rgb-difference-motion-stream)
+    - [Fusion](#fusion)
+  - [Setup](#setup)
+  - [Data preparation](#data-preparation)
+  - [Training](#training)
+  - [Evaluation and fusion](#evaluation-and-fusion)
+  - [Command-line options](#command-line-options)
+  - [Tests](#tests)
+  - [Project structure](#project-structure)
+  - [Limitations](#limitations)
 
 ---
 
-## Environment Setup
+## Results
 
-1. **Python Version:**  
-This project requires Python 3.7 or higher.
+Test accuracy on 1,079 videos from held-out groups (single clip per video unless noted).
 
-2. **Dependencies:**  
-Install the required Python packages by running:
+| Model | Input | Test accuracy |
+|---|---|---|
+| LRCN, ResNet34 | RGB, 16 frames | 86.65% |
+| LRCN, ResNet50 | RGB, 16 frames | 89.25% (89.71% with 3-clip testing) |
+| LRCN, ResNet50, LSTM 512 | RGB, 32 frames | 89.43% |
+| LRCN, ResNet50, LSTM 512 | RGB difference, 32 positions x 1 | 89.34% |
+| LRCN, ResNet50, LSTM 512 | RGB difference, 16 positions x 3 stacked | 91.38% |
+| **Two-stream fusion** | **RGB (32 frames) + stacked differences** | **93.88%** |
+
+The choice of motion stream and the fusion weight were selected on the validation split (equal
+weights scored best); the test set was evaluated once with that choice.
+
+Key observations:
+
+- **RGB-only LRCN plateaued around 89.5%.** Changing the backbone, frame count, and LSTM size
+  moved test accuracy by less than a point; the remaining errors were in fast, repetitive
+  actions (JumpingJack, Nunchucks, Lunges, JugglingBalls) that look alike in single frames.
+- **The motion stream fails on different classes.** It is strong on movement-defined classes
+  (e.g. JumpingJack 33% -> 62%, Nunchucks 52% -> 74% versus RGB) and weaker on scene-defined
+  ones (Biking, Drumming, MilitaryParade), so the two streams' errors barely overlap.
+- **Fusion gives the largest gain** (+4.5 points over RGB alone): for each video, the stream
+  suited to that class tends to be the more confident one.
+
+---
+
+## Method
+
+### Evaluation protocol
+
+UCF50 clips are grouped (25 groups per class); clips in a group are cut from the same source
+video, so they share the actor, background, and camera. Splitting clips at random leaks this
+information between train and test and inflates accuracy. Here, **whole groups** are assigned to
+one split, with the same group numbers held out for every class (seed 2026):
+
+| Split | Groups |
+|---|---|
+| Train | 1 2 3 4 7 9 10 12 13 14 15 16 17 18 19 21 22 23 24 |
+| Validation | 6 20 |
+| Test | 5 8 11 25 |
+
+Six classes have extra groups 26-30 (63 clips); these are excluded so every class has the same
+25 groups.
+
+### Model
+
+- **LRCN:** each sampled frame goes through an ImageNet-pretrained ResNet (fc layer removed);
+  the per-frame features are fed to an LSTM, and the last LSTM output passes through dropout
+  and a linear classifier.
+- **Temporal sampling:** each video is divided into equal segments and one frame is taken per
+  segment: at a random position during training (temporal jitter), and at a fixed position
+  (the center by default) for validation and testing.
+- **Augmentation:** clip-level `RandomResizedCrop`, horizontal flip, and color jitter, with the
+  same random parameters applied to every frame of a clip.
+- **Training:** AdamW, `ReduceLROnPlateau` on validation loss, early stopping on validation
+  loss, checkpoint chosen by validation accuracy, optional mixed precision (`--amp`), and
+  resumable runs (`--resume`).
+
+### RGB-difference (motion) stream
+
+Subtracting consecutive frames cancels static content (background, still objects) and leaves
+bright edges where something moved, an inexpensive stand-in for optical flow. At each sampled
+position *i*, the stream loads frames *i* ... *i+K* and stacks the *K* consecutive differences
+along the channel axis (`--diff_stack K`), so each time step covers a short motion window
+(about 0.12 s for K = 3). The ResNet's first convolution is widened to 3K input channels and
+initialized from its RGB weights, repeated K times and divided by K, so the pretrained layers
+still receive inputs on the scale they expect.
+
+### Fusion
+
+Each stream is evaluated separately and its softmax probabilities are saved (`--save_probs`).
+The fused prediction is the argmax of `w * p_rgb + (1 - w) * p_motion`, with `w` chosen on
+validation probabilities.
+
+---
+
+## Setup
+
+The project was developed on Google Colab (GPU runtime, High-RAM for more DataLoader workers).
 
 ```bash
 pip install -r requirements.txt
+```
 
-# Key Libraries
+Main dependencies: PyTorch, torchvision, OpenCV, scikit-learn, NumPy, Pillow, tqdm, Weights &
+Biases, pytest. Training logs to the W&B project `Video_Action_Recognition`; pass `--no-wandb`
+to disable logging.
 
-- **PyTorch**
-- **torchvision**
-- **OpenCV**
-- **scikit-learn**
-- **tqdm**
-- **numpy**
-- **Pillow**
-
-## Hardware Requirements
-
-A CUDA-enabled GPU is recommended for training. The code automatically detects GPU availability.
+The scripts import from `src/`, so set `PYTHONPATH=src` when calling `scripts/run.py` directly
+(`train.sh` and `test.sh` do this for you).
 
 ---
 
-## Preprocessing and Frame Extraction
+## Data preparation
 
-Before training, the raw video files must be converted into frame sequences. The preprocessing module includes functions for:
+1. **Download and extract UCF50** (the script caches the `.rar` in Google Drive and reuses it):
 
-### Uniform Frame Sampling
+   ```bash
+   python scripts/prep_dataset.py --drive_path /content/drive/MyDrive/datasets/ucf50 \
+       --local_path /content
+   ```
 
-- The `get_frames` function uses OpenCV to sample a fixed number of frames per video.
+2. **Extract frames** from every `.avi` into one folder of JPEGs per video. All frames are
+   kept; videos shorter than `--n_frames` are padded by duplicating frames.
 
-### Saving Frames to Disk
+   ```bash
+   python scripts/extract_frames.py --raw_dir /content/datasets/UCF50 \
+       --n_frames 16 --frame_dir /content/datasets/UCF50_frames
+   ```
 
-- The `store_frames` function writes the extracted frames as JPEG images.
-
-Integrate these functions into a preprocessing script (e.g., `preprocess.py`) to convert all videos into folders of extracted frames. The resulting folder structure should mirror the original dataset structure:
-
+The frames live on the runtime's local disk, so on Colab they must be re-extracted after every
+runtime reset.
 
 ---
 
-## Training the Model
+## Training
 
-### Step 1: Run Training
+`scripts/train.sh` sets the dataset path, split sizes, number of classes, and batch size; any
+extra arguments are passed through to `scripts/run.py` and override the defaults. Training
+saves the splits to `splits.npy` and checkpoints to `models/<run_name>/` (`best_model_wts.pt`
+and the resumable `last.pt`).
 
-#### Configure Training Parameters
-
-The training is managed via a bash script (e.g., `train.sh`) that calls the main training module.  
-**Important:** Update the `--frame_dir` argument in the script to point to the directory where your preprocessed frame data is stored. You can also adjust other parameters (e.g., number of frames per video, batch size, learning rate) to see how they affect the experiment.
-
-#### Run the Training Script
-
-Execute the training script from your terminal:
+**RGB stream:**
 
 ```bash
-bash train.sh
+bash scripts/train.sh --cnn_backbone resnet50 --dropout 0.3 --num_workers 7 --amp \
+    --fr_per_vid 32 --rnn_hidden_size 512 --run_name r50v2_do03_fpv32_h512
+```
 
-## During Training, the Script Will:
+**Stacked-difference stream:**
 
-- **Load the frame dataset.**
-- **Split the dataset** into training, validation, and test sets using stratified sampling.
-- **Apply data augmentation** techniques (resizing, random flips, affine transformations).
-- **Create custom PyTorch Datasets and DataLoaders.**
-- **Initialize the LRCN model** using a specified ResNet backbone.
-- **Set up the loss function, optimizer, and learning rate scheduler.**
-- **Run the training loop** while tracking loss and accuracy, saving the best model weights.
-
----
-
-## Testing and Evaluation
-
-### Step 2: Run Testing
-
-- **Configure Testing Parameters:**  
-  Update the `--ckpt` argument in your testing script (e.g., `test.sh`) to point to the saved best model weights generated during training.
-
-- **Run the Testing Script:**  
-  Execute the testing script from your terminal:
-  
 ```bash
-bash test.sh
-## Testing Script Overview
+bash scripts/train.sh --cnn_backbone resnet50 --dropout 0.3 --num_workers 7 --amp \
+    --fr_per_vid 16 --diff_stack 3 --rnn_hidden_size 512 --input_mode diff \
+    --run_name r50v2_diff3_fpv16_h512
+```
 
-The testing script will:
+**Resuming** an interrupted run restores the original arguments, model, optimizer, scheduler,
+and W&B run from `last.pt`:
 
-- **Load the dataset splits** (previously saved during training).
-- **Create a DataLoader for the test set.**
-- **Load the trained model checkpoint.**
-- **Evaluate the model** on the test data by computing overall accuracy, generating classification reports, and optionally producing confusion matrices.
-
----
-
-## Customization and Hyperparameters
-
-You can modify several parameters to experiment with different settings:
-
-### Data Parameters
-
-- `--frame_dir`: Path to your preprocessed frames.
-- `--fr_per_vid`: Number of frames to sample per video.
-
-### Model Parameters
-
-- `--model_type`: Choose between `'lrcn'` (default) or other supported models.
-- `--cnn_backbone`: Options include `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152`.
-- `--rnn_hidden_size` and `--rnn_n_layers`: Configure the LSTM network.
-
-### Training Parameters
-
-- `--batch_size`, `--learning_rate`, `--n_epochs`, and `--dropout` control the training dynamics.
-- `--train_size` and `--test_size` determine dataset splits.
-
-By tweaking these parameters, you can study their impact on model performance and experiment with different network configurations.
+```bash
+bash scripts/train.sh --resume models/<run_name>/last.pt --num_workers 7
+```
 
 ---
 
-## Summary of Steps
+## Evaluation and fusion
 
-- **Step 0: Dataset Preparation**  
-  Download, unzip, and organize the HMDB51 dataset into subdirectories by action class.
+`scripts/test.sh <checkpoint>` evaluates a checkpoint; extra arguments are passed through. The
+model-defining flags (`--cnn_backbone`, `--rnn_hidden_size`, `--fr_per_vid`, `--input_mode`,
+`--diff_stack`) must match the ones used in training. `--fr_per_vid` and `--input_mode` do not
+raise an error when wrong; they silently produce a different (lower) accuracy.
 
-- **Step 1: Run Training**  
-  Execute `train.sh` after configuring the `--frame_dir` and other hyperparameters to train the model.
+Save validation and test probabilities for each stream:
 
-- **Step 2: Run Testing**  
-  Execute `test.sh` after updating the `--ckpt` argument to point to the best model checkpoint to evaluate the model.
+```bash
+# RGB stream
+bash scripts/test.sh models/r50v2_do03_fpv32_h512/best_model_wts.pt --cnn_backbone resnet50 \
+    --rnn_hidden_size 512 --fr_per_vid 32 --split val --save_probs probs/val_run6_rgb.npz
+bash scripts/test.sh models/r50v2_do03_fpv32_h512/best_model_wts.pt --cnn_backbone resnet50 \
+    --rnn_hidden_size 512 --fr_per_vid 32 --save_probs probs/run6_rgb.npz
 
-Happy Training!
+# Stacked-difference stream
+bash scripts/test.sh models/r50v2_diff3_fpv16_h512/best_model_wts.pt --cnn_backbone resnet50 \
+    --rnn_hidden_size 512 --fr_per_vid 16 --input_mode diff --diff_stack 3 \
+    --split val --save_probs probs/val_diff3.npz
+bash scripts/test.sh models/r50v2_diff3_fpv16_h512/best_model_wts.pt --cnn_backbone resnet50 \
+    --rnn_hidden_size 512 --fr_per_vid 16 --input_mode diff --diff_stack 3 \
+    --save_probs probs/diff3.npz
+```
+
+The **Stream Fusion** section of `run.ipynb` loads these files, chooses the fusion weight on
+validation, and reports the fused test accuracy and per-class report.
+
+Each evaluation prints overall accuracy and loss, a per-class classification report, and
+per-class (one-vs-rest) confusion matrices. `--test_offsets 0.25 0.5 0.75` enables multi-clip
+testing (probabilities averaged over clips sampled at those positions within each segment).
+
+---
+
+## Command-line options
+
+The most relevant options of `scripts/run.py` (see `python scripts/run.py --help` for all):
+
+| Option | Purpose | Default |
+|---|---|---|
+| `--cnn_backbone` | ResNet backbone (`resnet18` ... `resnet152`) | `resnet34` |
+| `--rnn_hidden_size`, `--rnn_n_layers` | LSTM size | 100, 1 |
+| `--fr_per_vid` | Frames (time steps) sampled per video | 16 |
+| `--input_mode` | `rgb` frames or `diff` frame differences | `rgb` |
+| `--diff_stack` | Consecutive differences stacked per time step (`diff` only) | 1 |
+| `--dropout` | Dropout before the classifier | 0.1 |
+| `--learning_rate`, `--weight_decay` | AdamW settings | 3e-5, 0 |
+| `--freeze_layers` | ResNet stages to freeze (weights and BatchNorm statistics) | none |
+| `--n_epochs`, `--early_stop_patience` | Epoch limit and early stopping on val loss | 30, 10 |
+| `--amp` | Mixed precision (bf16 on A100-class GPUs, fp16 with loss scaling otherwise) | off |
+| `--resume` | Continue training from a `last.pt` checkpoint | none |
+| `--test_offsets` | Clip positions within each segment at evaluation; more than one averages clips | 0.5 |
+| `--split` | Split to evaluate: `test` or `val` | `test` |
+| `--save_probs` | Save evaluated probabilities and labels to a `.npz` file | none |
+| `--run_name`, `--wandb/--no-wandb` | W&B run name and logging | auto, on |
+
+---
+
+## Tests
+
+```bash
+python -m pytest -v -rs tests/
+```
+
+Tests that need the extracted UCF50 frames (frame counts, readable frames, no group leakage
+between splits) are skipped when the data is not present; the others (frame sampling,
+clip-level augmentation consistency, model batch independence, R3D weight inflation) run
+anywhere.
+
+---
+
+## Project structure
+
+```
+├── run.ipynb               Colab notebook: setup, data, tests, training, evaluation, fusion
+├── requirements.txt
+├── pytest.ini
+├── scripts/
+│   ├── prep_dataset.py     Download/extract UCF50 (cached in Google Drive)
+│   ├── extract_frames.py   Convert .avi videos to folders of JPEG frames
+│   ├── run.py              Entry point for training and evaluation
+│   ├── train.sh            Training wrapper (fixed dataset/split settings + extra args)
+│   └── test.sh             Evaluation wrapper (checkpoint path + extra args)
+├── src/
+│   ├── video_datasets.py   Frame sampling, RGB and RGB-difference datasets, group split
+│   ├── models.py           LRCN, conv1 widening for stacked differences, R3D-18
+│   ├── train.py            Training loop, AMP, checkpointing and resume
+│   ├── evaluate.py         Test loop, probabilities, reports, confusion matrices
+│   └── utils.py            Frame extraction helpers, transforms, DataLoaders
+└── tests/                  pytest suite
+```
+
+---
+
+## Limitations
+
+- Each configuration was trained once with a single seed, and the validation split has only 2
+  groups, so differences under about one point are within noise.
+- The stacked-difference run changed two settings at once (positions 32 -> 16, stack 1 -> 3),
+  so its gain cannot be attributed to stacking alone.
+- The two-stream model needs two forward passes per video.
+- RGB differences are sensitive to camera motion and lighting changes; optical flow or
+  video-pretrained (Kinetics) weights are natural next steps.
