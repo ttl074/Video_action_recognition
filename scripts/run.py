@@ -22,8 +22,10 @@ parameters, and training hyperparameters. Depending on the selected mode
       video, sampled at that position within each temporal segment.
     - With more than one value, runs multi-clip testing: one clip per offset, with softmax
       probabilities averaged across clips before taking the prediction.
-    - Logs test loss and accuracy to Weights & Biases, and prints overall test accuracy, a
-      per-class report, and per-class confusion matrices.
+    - Evaluates the test split by default, or the validation split with --split val, and can
+      save the softmax probabilities with --save_probs for ensembling models.
+    - Logs loss and accuracy to Weights & Biases, and prints overall accuracy, a per-class
+      report, and per-class confusion matrices.
 
 W&B logging can be turned off with --no-wandb, and runs can be named with --run_name.
 An interrupted training run can be continued from its last.pt checkpoint with --resume.
@@ -97,8 +99,10 @@ def args_parser():
             otherwise (e.g. T4).
         --input_mode: Model input: 'rgb' frames or 'diff' (differences between adjacent
             frames, a cheap motion signal) (default 'rgb').
-        --save_probs: Eval only; path of a .npz file to save the test softmax probabilities
-            and labels to, for ensembling models later (default None, not saved).
+        --save_probs: Eval only; path of a .npz file to save the evaluated split's softmax
+            probabilities and labels to, for ensembling models later (default None).
+        --split: Eval only; which saved split to evaluate: 'test' or 'val' (default 'test').
+            Use 'val' to choose ensemble settings without looking at test results.
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -156,7 +160,9 @@ def args_parser():
     parser.add_argument('--input_mode', choices=['rgb', 'diff'], default='rgb',
                         help="Model input: 'rgb' frames or 'diff' (adjacent-frame differences)")
     parser.add_argument('--save_probs', default=None,
-                        help='Eval only: .npz path to save test probabilities and labels to')
+                        help='Eval only: .npz path to save probabilities and labels to')
+    parser.add_argument('--split', choices=['test', 'val'], default='test',
+                        help="Eval only: saved split to evaluate ('test' or 'val')")
     return parser.parse_args()
 
 
@@ -342,9 +348,26 @@ def run_train(args, model, device, transforms, ckpt=None):
     wandb.finish()
 
 
+def eval_prefix(args):
+    """
+    Return the W&B key prefix for the split being evaluated.
+
+    Test results keep the 'test' prefix used by earlier runs. Validation results use
+    'val_eval' rather than 'val', so they are not mixed into the per-epoch 'val/...'
+    training curves in the W&B charts.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments (uses --split).
+
+    Returns:
+        str: 'test' or 'val_eval'.
+    """
+    return "test" if args.split == "test" else "val_eval"
+
+
 def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
     """
-    Evaluate the model on the test split with multi-clip testing.
+    Evaluate the model on a saved split (test or validation) with multi-clip testing.
 
     For each offset in args.test_offsets, samples one clip per video at that position
     within each temporal segment, runs the model, and prints that clip's own accuracy.
@@ -358,7 +381,7 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
             fr_per_vid, batch_size, model_type, num_workers, and save_probs.
         model (torch.nn.Module): Model with the checkpoint already loaded.
         device (torch.device): Device to run inference on.
-        ts_split (list): Test samples as (frame_dir, label) tuples.
+        ts_split (list): Samples to evaluate, as (frame_dir, label) tuples.
         val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
 
     Returns:
@@ -402,7 +425,10 @@ def multiclip_eval(args, model, device, ts_split, val_ts_transforms):
 
 def run_eval(args, model, device, val_ts_transforms):
     """
-    Evaluate a trained checkpoint on the saved test split and log test metrics.
+    Evaluate a trained checkpoint on a saved split (test by default) and log its metrics.
+
+    --split val evaluates the validation split instead, e.g. to save validation
+    probabilities with --save_probs for choosing ensemble settings.
 
     With one value in --test_offsets, runs standard single-clip testing: one clip per
     video, sampled at that position within each temporal segment (default 0.5, the
@@ -414,7 +440,7 @@ def run_eval(args, model, device, val_ts_transforms):
     Args:
         args (argparse.Namespace): Parsed command-line arguments (uses --ckpt,
             --test_offsets, --input_mode, --fr_per_vid, --batch_size, --model_type,
-            --num_workers, --save_probs, and --frame_dir).
+            --num_workers, --save_probs, --split, and --frame_dir).
         model (torch.nn.Module): A model with the same architecture as the checkpoint.
         device (torch.device): Device (CPU or GPU) on which to evaluate.
         val_ts_transforms (callable): Validation/test transforms from compose_data_transforms.
@@ -422,13 +448,14 @@ def run_eval(args, model, device, val_ts_transforms):
     Notes:
         - Single-clip results are logged to W&B as test/acc and test/loss; multi-clip
           results as test/acc_multiclip and test/loss_multiclip. test/n_clips records
-          the number of clips either way.
+          the number of clips either way. With --split val, the prefix is val_eval
+          instead of test.
         - Prints overall accuracy and loss, the per-class classification report, and the
           per-class confusion matrices.
     """
-    # Load saved dataset splits
+    # Load the saved dataset split to evaluate
     splits = np.load(SPLITS_PATH, allow_pickle=True)
-    ts_split = [(sample[0], int(sample[1])) for sample in splits.item()['test']]
+    ts_split = [(sample[0], int(sample[1])) for sample in splits.item()[args.split]]
 
     # Load the trained model checkpoint
     model.load_state_dict(torch.load(args.ckpt, map_location=device))
@@ -447,14 +474,16 @@ def run_eval(args, model, device, val_ts_transforms):
             args.batch_size, args.model_type, args.num_workers)
         targets, outputs, accuracy, loss = test(model, dataloaders['test'], device,
                                                 nn.CrossEntropyLoss(reduction='sum'))
-    wandb.log({f"test/loss{suffix}": loss, f"test/acc{suffix}": accuracy,
-               "test/n_clips": len(args.test_offsets)})
+    wandb.log({f"{eval_prefix(args)}/loss{suffix}": loss,
+               f"{eval_prefix(args)}/acc{suffix}": accuracy,
+               f"{eval_prefix(args)}/n_clips": len(args.test_offsets)})
 
     # Class names in label order (load_dataset numbers classes by sorted folder name)
     _, labels_dict = load_dataset(args.frame_dir)
     all_cats = sorted(labels_dict, key=labels_dict.get)
-    print(f'The overall {len(args.test_offsets)}-clip test accuracy is {100 * accuracy:.4f}%.')
-    print(f'The overall {len(args.test_offsets)}-clip test loss is {loss:.4f}')
+    print(f'The overall {len(args.test_offsets)}-clip {args.split} accuracy is '
+          f'{100 * accuracy:.4f}%.')
+    print(f'The overall {len(args.test_offsets)}-clip {args.split} loss is {loss:.4f}')
     print(get_test_report(targets, outputs, all_cats))
     print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
     wandb.finish()
