@@ -19,6 +19,12 @@ RGB-only LRCN.
   - [Contents](#contents)
   - [Results](#results)
   - [Experiment tracking](#experiment-tracking)
+  - [Bugs found in the starter code](#bugs-found-in-the-starter-code)
+    - [1. Data leak: random split across UCF50 groups](#1-data-leak-random-split-across-ucf50-groups)
+    - [2. LSTM read the batch as the time axis](#2-lstm-read-the-batch-as-the-time-axis)
+    - [3. Frames loaded out of order](#3-frames-loaded-out-of-order)
+    - [4. Augmentation drawn independently for each frame](#4-augmentation-drawn-independently-for-each-frame)
+    - [Other errors](#other-errors)
   - [Changes from the starter code](#changes-from-the-starter-code)
     - [Evaluation protocol and data](#evaluation-protocol-and-data)
     - [Models](#models)
@@ -87,24 +93,94 @@ All training, evaluation, and fusion runs are logged to Weights & Biases:
 
 ---
 
+## Bugs found in the starter code
+
+The starter code is preserved in the first commit (`cff27c3`). The two most serious problems
+were a data leak in the train/validation/test split and an LSTM that mixed information across
+the clips in a batch. Each fix below names the test that guards it.
+
+### 1. Data leak: random split across UCF50 groups
+
+- **Problem:** `dataset_split` used `StratifiedShuffleSplit` on individual clips. UCF50 clips in
+  the same group are cut from the same source video (same actor, background, and camera), so
+  near-duplicate clips of one group landed in train, validation, and test at once.
+- **Effect:** Test accuracy measured recognition of scenes the model had already seen, not of
+  actions, so it was inflated.
+- **Fix:** Whole groups are assigned to a single split, with the same group numbers held out
+  for every class (see [Evaluation protocol](#evaluation-protocol)). Group numbers are parsed
+  from the folder names by `get_group`.
+- **Test:** `test_data_leaks` checks that the three splits share no groups and together cover
+  all 25.
+
+### 2. LSTM read the batch as the time axis
+
+- **Problem:** In `LRCN`, the LSTM was built without `batch_first=True`, so it expected input of
+  shape (time, batch, features). `forward` fed it one frame at a time as `y.unsqueeze(1)`, which
+  has shape (batch, 1, features). The LSTM therefore read the batch as a time sequence of
+  length B with a batch of 1: within each frame step it ran through the clips one after another,
+  and its hidden state was carried from the last clip of one step into the first clip of the
+  next.
+- **Effect:** Each clip's prediction depended on which other clips shared its batch and on
+  their order. Training shuffled the batches, and evaluation used a different batch size
+  (2x), so the model was evaluated under different conditions than it was trained in.
+- **Fix:** The LSTM uses `batch_first=True`. All B x T frames go through the ResNet in one
+  pass, the features are reshaped to (B, T, F), and the LSTM processes each clip's own frame
+  sequence. This also replaces the per-frame Python loop.
+- **Test:** `test_batch_independence` checks that each clip's output is the same whether it is
+  run alone or in a batch. The starter model fails this check for every clip in the batch.
+
+### 3. Frames loaded out of order
+
+- **Problem:** `VideoDataset` listed frames with `glob.glob` (no guaranteed order) and kept the
+  first `fr_per_vid` paths. Frames were also saved as `frame0.jpg`, `frame1.jpg`, ...,
+  `frame10.jpg` without zero padding, so even a sorted listing puts `frame10` before `frame2`.
+- **Effect:** The LSTM received frames in arbitrary order, so the temporal model had no
+  reliable motion to learn from.
+- **Fix:** Frames are saved as zero-padded `00000.jpg`, `00001.jpg`, ..., listed in numeric
+  order by `list_frames`, and sampled one per temporal segment (`sample_frame_indices`).
+- **Test:** `test_sample_frame_paths` checks that sampled frames are in order and fall inside
+  their segments.
+
+### 4. Augmentation drawn independently for each frame
+
+- **Problem:** The training transforms (random flip and random translation) were applied to
+  each frame separately, so frames of the same clip could be flipped or shifted differently.
+- **Effect:** Random flips and shifts between consecutive frames look like motion that is not
+  in the video, which corrupts the temporal signal the LSTM relies on.
+- **Fix:** Transforms use `torchvision.transforms.v2` and are called once per clip, so the same
+  crop, flip, and color jitter are applied to every frame.
+- **Test:** `test_train_transform_frame_consistency` checks that all frames of a clip receive
+  identical augmentation.
+
+### Other errors
+
+| Location (starter) | Problem | Fix |
+|---|---|---|
+| `models.py`, `LRCN.__init__` | `cnn_model='resnet152'` silently built a ResNet34 (marked as a "placeholder"). | Builds ResNet152. |
+| `run.py`, `--pretrained` | Parsed as a string, so `--pretrained False` was truthy and still loaded ImageNet weights. | `--pretrained/--no-pretrained` boolean flag. |
+| `video_datasets.py`, `collate_fn_r3d_18` | Labels were filtered by zipping with the already-filtered clip list, so after an empty clip was dropped, clips and labels fell out of alignment. | Clips and labels are filtered together, as pairs. |
+| `utils.py`, `get_frames` | Sampled `n_frames + 1` frame indices, so 17 frames were saved and the dataset then kept only the first 16. | Every frame is extracted; sampling happens in the dataset. |
+| `train.sh`, `test.sh` | Configured for HMDB51 (`--frame_dir HMDB51`, `--n_classes 51`); `test.sh` pointed to a checkpoint on another user's machine. | Set for UCF50 (50 classes); `test.sh` takes the checkpoint path as an argument. |
+| `run.py`, eval mode | `torch.load` had no `map_location`, so a GPU checkpoint failed to load on a CPU-only machine. The per-class report and confusion matrix were commented out and referred to undefined variables. | `map_location=device`; both reports are printed. |
+| `models.py` | Used the deprecated torchvision `pretrained=` argument. | Uses the `weights=` API. |
+
+---
+
 ## Changes from the starter code
 
 The project started from an LRCN template (ResNet34 + LSTM, a fixed number of frames per video,
-a stratified random split, Adam). The main changes, grouped by area:
+a stratified random split, Adam). Beyond the bug fixes above, the main changes, grouped by area:
 
 ### Evaluation protocol and data
 
-- **Group-held-out split instead of a random split.** Clips from the same UCF50 group share the
-  actor, background, and camera, so a random split leaks near-duplicate clips into the test set.
-  Whole groups are now assigned to train, validation, or test (`dataset_split`), and a test
-  checks that no group appears in more than one split.
+- **Group-held-out split** (see [bug 1](#1-data-leak-random-split-across-ucf50-groups)).
 - **All frames extracted, sampled per segment.** Every frame of each video is stored, and each
   clip takes one frame per equal-length temporal segment: at a random position in training
   (temporal jitter, so each epoch sees different frames) and at a fixed position in evaluation.
-- **Clip-level augmentation.** Random crop, flip, and color jitter are drawn once per clip and
-  applied to every frame; previously each frame was transformed independently.
-- **Collate fix.** Empty clips are filtered together with their labels, so clips and labels
-  can no longer fall out of alignment.
+- **Stronger augmentation.** `RandomResizedCrop` (50-100% of the frame) and color jitter were
+  added to the flip, all drawn once per clip (see
+  [bug 4](#4-augmentation-drawn-independently-for-each-frame)); evaluation frames are resized
+  on the short side and center-cropped instead of stretched to 224 x 224.
 
 ### Models
 
